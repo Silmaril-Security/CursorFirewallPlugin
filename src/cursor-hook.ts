@@ -1,7 +1,7 @@
 import { Firewall, HookLabel } from "@silmaril-security/sdk";
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { consumeOutputDecision, writeOutputDecision, type CachedOutputDecision } from "./decision-cache.js";
 import {
   buildLocalProtectionEvent,
@@ -571,4 +571,12 @@ async function main(): Promise<void> {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();
+function isMainModule(): boolean {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1] as string) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) await main();

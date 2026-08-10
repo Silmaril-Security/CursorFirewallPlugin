@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, symlink } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 async function withMockFirewall(run) {
@@ -28,9 +29,9 @@ async function withMockFirewall(run) {
   }
 }
 
-function runHook(input, env) {
+function runHook(input, env, hookPath) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [new URL("../dist/cursor-hook.js", import.meta.url).pathname], { env });
+    const child = spawn(process.execPath, [hookPath], { env });
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -52,6 +53,9 @@ function runHook(input, env) {
 test("bundled command hook speaks Cursor JSON over stdio", async () => {
   await withMockFirewall(async (apiUrl, requests) => {
     const evidenceDirectory = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-cli-"));
+    const pluginLink = path.join(evidenceDirectory, "plugin-link");
+    await symlink(fileURLToPath(new URL("..", import.meta.url)), pluginLink, "dir");
+    const hookPath = path.join(pluginLink, "dist", "cursor-hook.js");
     const input = JSON.stringify({
       hook_event_name: "beforeSubmitPrompt",
       conversation_id: "conversation-cli",
@@ -69,13 +73,13 @@ test("bundled command hook speaks Cursor JSON over stdio", async () => {
       SILMARIL_LOCAL_EVENT_DIR: evidenceDirectory,
     };
 
-    const blocked = await runHook(input, { ...commonEnv, SILMARIL_BLOCK_MALICIOUS: "true" });
+    const blocked = await runHook(input, { ...commonEnv, SILMARIL_BLOCK_MALICIOUS: "true" }, hookPath);
     assert.deepEqual(JSON.parse(blocked.stdout), {
       continue: false,
       user_message: "Silmaril Firewall blocked potentially malicious content.",
     });
 
-    const shadow = await runHook(input, { ...commonEnv, SILMARIL_BLOCK_MALICIOUS: "false" });
+    const shadow = await runHook(input, { ...commonEnv, SILMARIL_BLOCK_MALICIOUS: "false" }, hookPath);
     assert.equal(shadow.stdout, "");
     assert.equal(requests.length, 2);
     assert.ok(requests.every((payload) => payload.hook === "user_input"));
