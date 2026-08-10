@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      { "command": "node ./dist/cursor-hook.js", "timeout": 10, "failClosed": false }
+    ],
+    "preToolUse": [
+      { "command": "node ./dist/cursor-hook.js", "timeout": 10, "failClosed": false }
+    ],
+    "beforeReadFile": [
+      { "command": "node ./dist/cursor-hook.js", "timeout": 10, "failClosed": false }
+    ],
+    "postToolUse": [
+      { "command": "node ./dist/cursor-hook.js", "timeout": 10, "failClosed": false }
+    ],
+    "postToolUseFailure": [
+      { "command": "node ./dist/cursor-hook.js", "timeout": 10, "failClosed": false }
+    ],
+    "afterAgentResponse": [
+      { "command": "node ./dist/cursor-hook.js", "timeout": 10, "failClosed": false }
+    ],
+    "afterAgentThought": [
+      { "command": "node ./dist/cursor-hook.js", "timeout": 10, "failClosed": false }
+    ],
+    "stop": [
+      { "command": "node ./dist/cursor-hook.js", "timeout": 10, "loop_limit": 1, "failClosed": false }
+    ],
+    "subagentStart": [
+      { "command": "node ./dist/cursor-hook.js", "timeout": 10, "failClosed": false }
+    ],
+    "subagentStop": [
+      { "command": "node ./dist/cursor-hook.js", "timeout": 10, "loop_limit": 1, "failClosed": false }
+    ]
+  }
+}
