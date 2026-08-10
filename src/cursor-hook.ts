@@ -1,4 +1,4 @@
-import { Firewall, HookLabel } from "@silmaril-security/sdk";
+import { Firewall, HookLabel, type FirewallOptions } from "@silmaril-security/sdk";
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -34,7 +34,7 @@ type FirewallClient = {
   classify(text: string, options?: ClassifyOptions): Promise<ClassificationResult>;
   classifyBatch?(texts: string[], options?: ClassifyBatchOptions): Promise<ClassificationResult[]>;
 };
-type FirewallConstructor = new (options: { apiKey: string; apiUrl: string; timeoutMs: number }) => FirewallClient;
+type FirewallConstructor = new (options: FirewallOptions) => FirewallClient;
 type HookRecord = Record<string, unknown>;
 type HookOutput = Record<string, unknown>;
 

@@ -309,7 +309,7 @@ test("local evidence is redacted and written atomically with private permissions
   assert.equal(output.permission, "deny");
 });
 
-test("demo launcher normalizes URLs and never returns the key", () => {
+test("demo launcher normalizes URLs and never returns the key", async () => {
   assert.equal(normalizeBaseUrl("example.com/path?key=value"), "https://example.com");
   assert.equal(buildDemoUrl("https://app.silmaril.dev", "setup"), "https://app.silmaril.dev/demo/setup-complete");
   assert.equal(buildDemoUrl("http://localhost:3001", "playground"), "http://localhost:3001/demo/playground");
@@ -317,10 +317,18 @@ test("demo launcher normalizes URLs and never returns the key", () => {
   assert.doesNotMatch(statusPayload, /super-secret/u);
   assert.match(statusPayload, /https:\/\/api\.example/u);
 
-  const child = new EventEmitter();
-  child.unref = () => undefined;
-  assert.equal(openBrowser("https://example.com", () => child), true);
-  child.emit("error", new Error("missing opener"));
+  const openedChild = new EventEmitter();
+  openedChild.unref = () => undefined;
+  const opened = openBrowser("https://example.com", () => openedChild);
+  openedChild.emit("spawn");
+  assert.equal(await opened, true);
+
+  const failedChild = new EventEmitter();
+  failedChild.unref = () => undefined;
+  const failed = openBrowser("https://example.com", () => failedChild);
+  failedChild.emit("error", new Error("missing opener"));
+  assert.equal(await failed, false);
+  assert.equal(await openBrowser("https://example.com", () => { throw new Error("spawn failed"); }), false);
 
   const originalArgs = process.argv;
   process.argv = ["node", "script", "--route", "--open"];
