@@ -1,0 +1,39 @@
+{
+  "name": "@silmaril/cursor-firewall-plugin",
+  "version": "0.1.0",
+  "description": "Silmaril Firewall lifecycle protection for Cursor agents and subagents.",
+  "type": "module",
+  "private": true,
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    ".cursor-plugin",
+    "dist",
+    "hooks",
+    "scripts/open-playground.mjs",
+    "skills",
+    "README.md",
+    "ARCHITECTURE.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "npm run typecheck",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "pack:dry": "npm pack --dry-run",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@silmaril-security/sdk": "0.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
+}
