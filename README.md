@@ -6,21 +6,39 @@ The plugin classifies host-visible prompts, tool calls, tool results, file reads
 
 ## Install
 
-Clone the repository and load it from Cursor's local plugin directory:
+Clone the repository and install a lean copy into Cursor's local plugin directory:
 
 ```sh
 git clone https://github.com/Silmaril-Security/CursorFirewallPlugin.git
-mkdir -p "$HOME/.cursor/plugins/local"
-ln -s "$(pwd)/CursorFirewallPlugin" "$HOME/.cursor/plugins/local/silmaril-firewall"
+cd CursorFirewallPlugin
+npm ci
+npm run install:local
 ```
+
+Cursor rejects local-plugin symlinks whose targets are outside `~/.cursor/plugins/local`. The installer atomically writes only the packaged runtime, manifests, hooks, skill, and documentation; it excludes `node_modules`, source, and tests.
 
 Restart Cursor or run **Developer: Reload Window**. Confirm **Silmaril Firewall** appears under **Customize → Plugins** and inspect the Hooks output channel for loading errors.
 
-This repository intentionally has no Cursor Marketplace manifest or submission. Local plugin loading is the supported v0.1.0 distribution path.
+This repository intentionally has no Cursor Marketplace manifest or submission. Local plugin loading is the supported distribution path.
 
 ## Configure
 
-Set the following variables in the environment inherited by Cursor. Never commit their values.
+The macOS app writes a private configuration file at `~/.cursor/silmaril-firewall.json`:
+
+```json
+{
+  "enabled": true,
+  "apiUrl": "https://...",
+  "apiKey": "...",
+  "timeoutMs": 2500,
+  "blockMalicious": false,
+  "debug": false
+}
+```
+
+The file must be a regular file owned by the current user with no group or world permissions. Symbolic links, files larger than 64 KiB, malformed JSON, and insecure permissions are ignored. `SILMARIL_CONFIG_PATH` can select a different private file.
+
+Environment variables remain supported as a fallback when no valid private file exists. When the private file exists, it is authoritative for enabled state, credentials, timeout, and mode so ambient shell variables cannot silently replace app-managed protection. `SILMARIL_DEBUG` remains an explicit diagnostic override.
 
 ```sh
 export SILMARIL_API_URL="https://..."
@@ -28,9 +46,10 @@ export SILMARIL_API_KEY="..."
 export SILMARIL_TIMEOUT_MS="2500"
 export SILMARIL_BLOCK_MALICIOUS="false"
 export SILMARIL_DEBUG="false"
+export SILMARIL_ENABLED="true"
 ```
 
-`SILMARIL_TIMEOUT_MS` accepts `250` through `10000`. Missing configuration, malformed hook input, invalid classifier responses, SDK failures, network errors, and timeouts fail open. `SILMARIL_DEBUG=true` writes metadata-only diagnostics to stderr; raw classified content is never logged.
+`SILMARIL_TIMEOUT_MS` accepts `250` through `10000`. Missing or insecure configuration, malformed hook input, invalid classifier responses, SDK failures, network errors, and timeouts fail open. `SILMARIL_DEBUG=true` writes metadata-only diagnostics to stderr; raw classified content is never logged.
 
 Set `SILMARIL_LOCAL_EVENT_DIR` only when the default private evidence spool must be overridden.
 
@@ -53,7 +72,7 @@ The generic `preToolUse` hook covers Shell, Read, Write, Delete, Task, and MCP t
 
 Subagent transcript capture is bounded to a 2 MiB host transcript and the latest 256 visible segments. Malformed, missing, oversized, or unknown transcript records fail open. Reasoning is classified only when Cursor explicitly exposes a completed reasoning block; it is never written to logs, evidence, or the output-decision cache.
 
-Cursor Tab/inline-completion hooks are not included in v0.1.0. Local plugin installation does not establish a supported cloud-agent distribution path, so cloud coverage is not claimed.
+Cursor Tab/inline-completion hooks are not included. Local plugin installation does not establish a supported cloud-agent distribution path, so cloud coverage is not claimed.
 
 ## Enforcement semantics
 
@@ -91,6 +110,7 @@ npm ci
 npm run lint
 npm test
 npm run pack:dry
+npm run install:local
 ```
 
 The committed `dist/cursor-hook.js` is rebuilt from TypeScript and bundles the pinned `@silmaril-security/sdk@0.5.0`, so users do not need to install dependencies after cloning a release.

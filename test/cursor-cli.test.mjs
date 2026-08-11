@@ -66,6 +66,7 @@ test("bundled command hook speaks Cursor JSON over stdio", async () => {
     });
     const commonEnv = {
       ...process.env,
+      SILMARIL_CONFIG_PATH: path.join(evidenceDirectory, "missing-config.json"),
       SILMARIL_API_KEY: "test-key",
       SILMARIL_API_URL: apiUrl,
       SILMARIL_TIMEOUT_MS: "2500",

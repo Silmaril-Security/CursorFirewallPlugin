@@ -4,6 +4,11 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { consumeOutputDecision, writeOutputDecision, type CachedOutputDecision } from "./decision-cache.js";
 import {
+  resolveRuntimeConfig,
+  type RuntimeConfig,
+  type RuntimeEnv,
+} from "./runtime-config.js";
+import {
   buildLocalProtectionEvent,
   writeLocalProtectionEvent,
   type LocalEvidenceInput,
@@ -13,20 +18,16 @@ import {
 
 export { consumeOutputDecision, writeOutputDecision } from "./decision-cache.js";
 export { buildLocalProtectionEvent, resolveLocalEventDirectory, writeLocalProtectionEvent } from "./local-evidence.js";
+export { configurationPath, resolveRuntimeConfig } from "./runtime-config.js";
 
 export const PLUGIN_NAME = "cursor-firewall-plugin";
-export const PLUGIN_VERSION = "0.1.0";
-const DEFAULT_TIMEOUT_MS = 2500;
-const MIN_TIMEOUT_MS = 250;
-const MAX_TIMEOUT_MS = 10_000;
+export const PLUGIN_VERSION = "0.1.2";
 const MAX_STDIN_BYTES = 4 * 1024 * 1024;
 const MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 const MAX_TRANSCRIPT_SEGMENTS = 256;
 const SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
 const SAFE_FOLLOWUP_MESSAGE = "Silmaril Firewall blocked the previous output. Continue without using or reproducing the flagged content.";
 
-type RuntimeEnv = Record<string, string | undefined>;
-type RuntimeConfig = { apiKey: string; apiUrl: string; timeoutMs: number; blockMalicious: boolean; debug: boolean };
 type ClassificationResult = Record<string, unknown>;
 type ClassifyOptions = { hook?: string; toolName?: string; metadata?: Record<string, unknown>; requestId?: string };
 type ClassifyBatchOptions = { hooks?: string[]; toolNames?: Array<string | undefined>; metadata?: Array<Record<string, unknown>>; requestId?: string };
@@ -121,19 +122,6 @@ export async function runCursorHook(
     debugClassification(env, target, result, blocking?.target === target);
   }
   return blocking ? buildBlockOutput(blocking.target, record) : undefined;
-}
-
-export function resolveRuntimeConfig(env: RuntimeEnv): RuntimeConfig | undefined {
-  const apiKey = env.SILMARIL_API_KEY?.trim();
-  const apiUrl = env.SILMARIL_API_URL?.trim();
-  if (!apiKey || !apiUrl) return undefined;
-  return {
-    apiKey,
-    apiUrl,
-    timeoutMs: integerInRange(env.SILMARIL_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS,
-    blockMalicious: parseBoolean(env.SILMARIL_BLOCK_MALICIOUS) ?? false,
-    debug: parseBoolean(env.SILMARIL_DEBUG) ?? false,
-  };
 }
 
 export function buildCursorTargets(input: HookRecord): Target[] {
@@ -452,6 +440,10 @@ function buildMetadata(input: HookRecord, extra: Record<string, unknown>): Recor
 }
 
 function logicalRequestId(input: HookRecord, suffix: string): string {
+  const runtimeMarker = readString(input.prompt)?.match(
+    /\bsilmaril-runtime-check:[0-9a-f-]{36}\b/iu,
+  )?.[0];
+  if (runtimeMarker) return runtimeMarker;
   return `cursor-${sha256([
     readString(input.conversation_id) ?? "",
     readString(input.generation_id) ?? "",
@@ -493,12 +485,6 @@ function stableStringify(value: unknown): string {
 
 function readTextOrSerialized(value: unknown): string {
   return typeof value === "string" ? value : stableStringify(value);
-}
-
-function integerInRange(value: unknown, minimum: number, maximum: number): number | undefined {
-  if (typeof value !== "string" || !value.trim()) return undefined;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : undefined;
 }
 
 function parseBoolean(value: unknown): boolean | undefined {

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.2
+
+- Make the private app-managed configuration authoritative over stale ambient shell variables.
+- Preserve `SILMARIL_DEBUG` as an explicit metadata-only diagnostic override.
+
+## 0.1.1
+
+- Add private host-local JSON configuration with environment overrides.
+- Replace the rejected out-of-tree symlink workflow with an atomic lean local installer.
+- Reject insecure, linked, oversized, or foreign-owned configuration files.
+
 ## 0.1.0
 
 - Initial public Cursor lifecycle plugin.

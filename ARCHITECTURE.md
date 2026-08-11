@@ -16,8 +16,10 @@ Subagent completion reads at most 2 MiB and classifies at most the latest 256 ho
 
 ## Trust boundaries
 
-Raw lifecycle content is sent only to the configured Silmaril Firewall endpoint through the SDK. It is not written locally. Local evidence carries only hashes, bounded taxonomy values, numeric scores, native actions, and version provenance. API keys and endpoints remain process configuration and are excluded from logs and evidence.
+Raw lifecycle content is sent only to the configured Silmaril Firewall endpoint through the SDK. It is not written locally. Local evidence carries only hashes, bounded taxonomy values, numeric scores, native actions, and version provenance. API keys and endpoints come from the private user-owned configuration file when it exists, with environment variables retained only as a fallback when the file is unavailable. They are excluded from logs and evidence. The runtime rejects symbolic links, oversized files, non-regular files, files owned by another user, and files with group or world permissions.
+
+Local installation uses an atomic, non-symlinked copy under `~/.cursor/plugins/local`. Only package allowlisted files are copied, so Cursor never scans the development checkout or `node_modules` and the source checkout remains independent from the active installation.
 
 ## Rollback
 
-Set `SILMARIL_BLOCK_MALICIOUS=false` for immediate observational behavior. Remove the symlink from `~/.cursor/plugins/local/silmaril-firewall` and reload Cursor to disable the plugin completely.
+Set `blockMalicious` to `false` for immediate observational behavior, or set `enabled` to `false` to disable classification without removing the plugin. Remove the plugin from `~/.cursor/plugins/local/silmaril-firewall` and reload Cursor to disable it completely.
