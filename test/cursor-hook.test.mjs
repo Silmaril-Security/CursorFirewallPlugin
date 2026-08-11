@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -24,6 +25,7 @@ import {
 } from "../scripts/open-playground.mjs";
 
 const BASE_ENV = {
+  SILMARIL_CONFIG_PATH: path.join(os.tmpdir(), `silmaril-cursor-tests-${process.pid}-missing.json`),
   SILMARIL_API_KEY: "test-key",
   SILMARIL_API_URL: "https://firewall.example/classify",
   SILMARIL_TIMEOUT_MS: "2500",
@@ -67,8 +69,10 @@ function captureDependencies(results, events = [], calls = []) {
   };
 }
 
-test("runtime config defaults and rejects incomplete configuration", () => {
-  assert.equal(resolveRuntimeConfig({}), undefined);
+test("runtime config defaults and rejects incomplete configuration", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-missing-config-"));
+  const missingConfig = path.join(root, "missing.json");
+  assert.equal(resolveRuntimeConfig({ SILMARIL_CONFIG_PATH: missingConfig }), undefined);
   assert.deepEqual(resolveRuntimeConfig(BASE_ENV), {
     apiKey: "test-key",
     apiUrl: "https://firewall.example/classify",
@@ -78,6 +82,69 @@ test("runtime config defaults and rejects incomplete configuration", () => {
   });
   assert.equal(resolveRuntimeConfig({ ...BASE_ENV, SILMARIL_TIMEOUT_MS: "249" }).timeoutMs, 2500);
   assert.equal(resolveRuntimeConfig({ ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "yes" }).blockMalicious, true);
+});
+
+test("runtime config treats a private host file as authoritative", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-config-"));
+  const configPath = path.join(root, "silmaril-firewall.json");
+  await writeFile(configPath, JSON.stringify({
+    enabled: true,
+    apiKey: "file-key",
+    apiUrl: "https://file.example/classify",
+    timeoutMs: 375,
+    blockMalicious: true,
+    debug: true,
+  }), { mode: 0o600 });
+  assert.deepEqual(resolveRuntimeConfig({ SILMARIL_CONFIG_PATH: configPath }), {
+    apiKey: "file-key",
+    apiUrl: "https://file.example/classify",
+    timeoutMs: 375,
+    blockMalicious: true,
+    debug: true,
+  });
+  assert.deepEqual(resolveRuntimeConfig({
+    SILMARIL_CONFIG_PATH: configPath,
+    SILMARIL_ENABLED: "false",
+    SILMARIL_API_KEY: "environment-key",
+    SILMARIL_API_URL: "https://stale.example/classify",
+    SILMARIL_TIMEOUT_MS: "9000",
+    SILMARIL_BLOCK_MALICIOUS: "false",
+  }), {
+    apiKey: "file-key",
+    apiUrl: "https://file.example/classify",
+    timeoutMs: 375,
+    blockMalicious: true,
+    debug: true,
+  });
+
+  await writeFile(configPath, JSON.stringify({
+    apiKey: "file-key",
+    apiUrl: "https://file.example/classify",
+  }), { mode: 0o600 });
+  assert.deepEqual(resolveRuntimeConfig({
+    SILMARIL_CONFIG_PATH: configPath,
+    SILMARIL_ENABLED: "false",
+    SILMARIL_API_KEY: "stale-key",
+    SILMARIL_API_URL: "https://stale.example/classify",
+    SILMARIL_TIMEOUT_MS: "9000",
+    SILMARIL_BLOCK_MALICIOUS: "true",
+  }), {
+    apiKey: "file-key",
+    apiUrl: "https://file.example/classify",
+    timeoutMs: 2500,
+    blockMalicious: false,
+    debug: false,
+  });
+
+  await chmod(configPath, 0o644);
+  assert.equal(resolveRuntimeConfig({
+    ...BASE_ENV,
+    SILMARIL_CONFIG_PATH: configPath,
+  }), undefined);
+  await chmod(configPath, 0o600);
+  const symlinkPath = path.join(root, "linked.json");
+  await symlink(configPath, symlinkPath);
+  assert.equal(resolveRuntimeConfig({ SILMARIL_CONFIG_PATH: symlinkPath }), undefined);
 });
 
 test("every supported Cursor lifecycle event maps to the intended Firewall hook", () => {
@@ -102,6 +169,21 @@ test("logical request IDs are stable but change across generations", () => {
   const nextGeneration = buildCursorTargets(hookInput("beforeSubmitPrompt", { prompt: "same", generation_id: "generation-2" }))[0].requestId;
   assert.equal(first, second);
   assert.notEqual(first, nextGeneration);
+});
+
+test("runtime verification markers correlate with local evidence", async () => {
+  const marker = "silmaril-runtime-check:123e4567-e89b-12d3-a456-426614174000";
+  const events = [];
+  await runCursorHook(
+    hookInput("beforeSubmitPrompt", { prompt: `Reply with OK only. ${marker}` }),
+    BASE_ENV,
+    captureDependencies([{ prediction: "BENIGN", score: 0.1, threshold: 0.5 }], events),
+  );
+  assert.equal(events.length, 1);
+  assert.equal(
+    events[0].requestFingerprint,
+    createHash("sha256").update(marker).digest("hex"),
+  );
 });
 
 test("shadow mode observes without returning hook output", async () => {
@@ -274,7 +356,7 @@ test("local evidence is redacted and written atomically with private permissions
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-evidence-"));
   const event = buildLocalProtectionEvent({
     pluginName: "cursor-firewall-plugin",
-    pluginVersion: "0.1.0",
+    pluginVersion: "0.1.2",
     hook: "user_input",
     mode: "block",
     requestId: "raw-request-id",
@@ -340,7 +422,7 @@ test("package and Cursor manifests preserve release invariants", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const pluginJson = JSON.parse(await readFile(new URL("../.cursor-plugin/plugin.json", import.meta.url), "utf8"));
   const hooksJson = JSON.parse(await readFile(new URL("../hooks/hooks.json", import.meta.url), "utf8"));
-  assert.equal(packageJson.version, "0.1.0");
+  assert.equal(packageJson.version, "0.1.2");
   assert.equal(pluginJson.version, packageJson.version);
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.5.0");
   assert.equal(packageJson.private, true);

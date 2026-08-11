@@ -909,7 +909,7 @@ init_hooks();
 
 // src/cursor-hook.ts
 import { createHash as createHash3 } from "node:crypto";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { readFileSync as readFileSync2, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // src/decision-cache.ts
@@ -1034,10 +1034,116 @@ function omitUndefined(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== void 0));
 }
 
+// src/runtime-config.ts
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join } from "node:path";
+var DEFAULT_TIMEOUT_MS2 = 2500;
+var MIN_TIMEOUT_MS = 250;
+var MAX_TIMEOUT_MS = 1e4;
+var MAX_CONFIG_BYTES = 64 * 1024;
+function resolveRuntimeConfig(env = process.env) {
+  const fileResult = readFileConfig(configurationPath(env));
+  if (fileResult.state === "invalid") return void 0;
+  if (fileResult.state === "valid") {
+    const file = fileResult.config;
+    const enabled2 = file.enabled ?? true;
+    if (!enabled2) return void 0;
+    const apiKey2 = nonEmpty(file.apiKey);
+    const apiUrl2 = nonEmpty(file.apiUrl);
+    if (!apiKey2 || !apiUrl2) return void 0;
+    return {
+      apiKey: apiKey2,
+      apiUrl: apiUrl2,
+      timeoutMs: file.timeoutMs ?? DEFAULT_TIMEOUT_MS2,
+      blockMalicious: file.blockMalicious ?? false,
+      debug: parseBoolean(env.SILMARIL_DEBUG) ?? file.debug ?? false
+    };
+  }
+  const enabled = parseBoolean(env.SILMARIL_ENABLED) ?? true;
+  if (!enabled) return void 0;
+  const apiKey = nonEmpty(env.SILMARIL_API_KEY);
+  const apiUrl = nonEmpty(env.SILMARIL_API_URL);
+  if (!apiKey || !apiUrl) return void 0;
+  return {
+    apiKey,
+    apiUrl,
+    timeoutMs: integerInRange(env.SILMARIL_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS2,
+    blockMalicious: parseBoolean(env.SILMARIL_BLOCK_MALICIOUS) ?? false,
+    debug: parseBoolean(env.SILMARIL_DEBUG) ?? false
+  };
+}
+function configurationPath(env = process.env) {
+  return nonEmpty(env.SILMARIL_CONFIG_PATH) ?? join(homedir2(), ".cursor", "silmaril-firewall.json");
+}
+function readFileConfig(path3) {
+  let descriptor;
+  try {
+    descriptor = openSync(path3, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const metadata = fstatSync(descriptor);
+    if (!metadata.isFile() || metadata.size > MAX_CONFIG_BYTES || (metadata.mode & 63) !== 0) {
+      return { state: "invalid" };
+    }
+    if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) {
+      return { state: "invalid" };
+    }
+    const parsed = JSON.parse(readFileSync(descriptor, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { state: "invalid" };
+    }
+    const record = parsed;
+    const config = {};
+    const enabled = booleanValue(record.enabled);
+    const apiKey = stringValue(record.apiKey);
+    const apiUrl = stringValue(record.apiUrl);
+    const timeoutMs = typeof record.timeoutMs === "number" ? integerInRange(record.timeoutMs) : void 0;
+    const blockMalicious = booleanValue(record.blockMalicious);
+    const debug = booleanValue(record.debug);
+    if (Object.hasOwn(record, "enabled") && enabled === void 0 || Object.hasOwn(record, "apiKey") && apiKey === void 0 || Object.hasOwn(record, "apiUrl") && apiUrl === void 0 || Object.hasOwn(record, "timeoutMs") && timeoutMs === void 0 || Object.hasOwn(record, "blockMalicious") && blockMalicious === void 0 || Object.hasOwn(record, "debug") && debug === void 0) {
+      return { state: "invalid" };
+    }
+    if (enabled !== void 0) config.enabled = enabled;
+    if (apiKey !== void 0) config.apiKey = apiKey;
+    if (apiUrl !== void 0) config.apiUrl = apiUrl;
+    if (timeoutMs !== void 0) config.timeoutMs = timeoutMs;
+    if (blockMalicious !== void 0) config.blockMalicious = blockMalicious;
+    if (debug !== void 0) config.debug = debug;
+    return { state: "valid", config };
+  } catch (error) {
+    return isMissingFileError(error) ? { state: "missing" } : { state: "invalid" };
+  } finally {
+    if (descriptor !== void 0) closeSync(descriptor);
+  }
+}
+function isMissingFileError(error) {
+  return error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
+}
+function integerInRange(value) {
+  const parsed = typeof value === "string" && value.trim() ? Number(value) : value;
+  return typeof parsed === "number" && Number.isInteger(parsed) && parsed >= MIN_TIMEOUT_MS && parsed <= MAX_TIMEOUT_MS ? parsed : void 0;
+}
+function parseBoolean(value) {
+  if (typeof value !== "string") return void 0;
+  if (/^(?:1|true|yes|on)$/iu.test(value.trim())) return true;
+  if (/^(?:0|false|no|off)$/iu.test(value.trim())) return false;
+  return void 0;
+}
+function nonEmpty(value) {
+  if (typeof value !== "string") return void 0;
+  const trimmed = value.trim();
+  return trimmed || void 0;
+}
+function stringValue(value) {
+  return typeof value === "string" ? value : void 0;
+}
+function booleanValue(value) {
+  return typeof value === "boolean" ? value : void 0;
+}
+
 // src/local-evidence.ts
 import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
 import { chmod as chmod2, lstat as lstat2, mkdir as mkdir2, open as open2, rename as rename2, rm as rm2 } from "node:fs/promises";
-import { homedir as homedir2 } from "node:os";
+import { homedir as homedir3 } from "node:os";
 import path2 from "node:path";
 var MAX_EVENT_BYTES = 16 * 1024;
 var MAX_SAFE_VALUE_LENGTH = 128;
@@ -1064,7 +1170,7 @@ function buildLocalProtectionEvent(input) {
     host: "cursor",
     hook: input.hook,
     mode: input.mode,
-    requestFingerprint: fingerprint2("request", input.requestId),
+    requestFingerprint: runtimeRequestFingerprint(input.requestId) ?? fingerprint2("request", input.requestId),
     sessionFingerprint: fingerprint2("session", input.sessionId),
     toolDisplayName: safeToolName(input.toolName),
     riskClass,
@@ -1118,7 +1224,7 @@ async function writeLocalProtectionEvent(event, env = process.env) {
 function resolveLocalEventDirectory(env = process.env) {
   const configured = env.SILMARIL_LOCAL_EVENT_DIR?.trim();
   if (configured) return configured;
-  const configuredHome = env.HOME?.trim() || homedir2();
+  const configuredHome = env.HOME?.trim() || homedir3();
   return path2.join(configuredHome, ...DEFAULT_DIRECTORY);
 }
 function normalizePrediction(value) {
@@ -1157,6 +1263,9 @@ function safeToolName(value) {
 function fingerprint2(namespace, value) {
   return typeof value === "string" && value.trim() ? sha2562(`${namespace}:${value}`) : void 0;
 }
+function runtimeRequestFingerprint(value) {
+  return typeof value === "string" && /^silmaril-runtime-check:[0-9a-f-]{36}$/iu.test(value) ? sha2562(value) : void 0;
+}
 function stableId(namespace, ...values) {
   return `${namespace}-${sha2562(values.filter(Boolean).join("\0"))}`;
 }
@@ -1173,10 +1282,7 @@ function omitUndefined2(value) {
 
 // src/cursor-hook.ts
 var PLUGIN_NAME = "cursor-firewall-plugin";
-var PLUGIN_VERSION = "0.1.0";
-var DEFAULT_TIMEOUT_MS2 = 2500;
-var MIN_TIMEOUT_MS = 250;
-var MAX_TIMEOUT_MS = 1e4;
+var PLUGIN_VERSION = "0.1.2";
 var MAX_STDIN_BYTES = 4 * 1024 * 1024;
 var MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 var MAX_TRANSCRIPT_SEGMENTS = 256;
@@ -1234,18 +1340,6 @@ async function runCursorHook(input, env = process.env, dependencies = {}) {
     debugClassification(env, target, result, blocking?.target === target);
   }
   return blocking ? buildBlockOutput(blocking.target, record) : void 0;
-}
-function resolveRuntimeConfig(env) {
-  const apiKey = env.SILMARIL_API_KEY?.trim();
-  const apiUrl = env.SILMARIL_API_URL?.trim();
-  if (!apiKey || !apiUrl) return void 0;
-  return {
-    apiKey,
-    apiUrl,
-    timeoutMs: integerInRange(env.SILMARIL_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS2,
-    blockMalicious: parseBoolean(env.SILMARIL_BLOCK_MALICIOUS) ?? false,
-    debug: parseBoolean(env.SILMARIL_DEBUG) ?? false
-  };
 }
 function buildCursorTargets(input) {
   const hookEventName = readString(input.hook_event_name);
@@ -1429,7 +1523,7 @@ function readCursorTranscriptSegments(transcriptPath) {
   }
   let encoded;
   try {
-    encoded = readFileSync(transcriptPath, "utf8");
+    encoded = readFileSync2(transcriptPath, "utf8");
   } catch {
     return [];
   }
@@ -1504,6 +1598,10 @@ function buildMetadata(input, extra) {
   });
 }
 function logicalRequestId(input, suffix) {
+  const runtimeMarker = readString(input.prompt)?.match(
+    /\bsilmaril-runtime-check:[0-9a-f-]{36}\b/iu
+  )?.[0];
+  if (runtimeMarker) return runtimeMarker;
   return `cursor-${sha2563([
     readString(input.conversation_id) ?? "",
     readString(input.generation_id) ?? "",
@@ -1542,12 +1640,7 @@ function stableStringify(value) {
 function readTextOrSerialized(value) {
   return typeof value === "string" ? value : stableStringify(value);
 }
-function integerInRange(value, minimum, maximum) {
-  if (typeof value !== "string" || !value.trim()) return void 0;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : void 0;
-}
-function parseBoolean(value) {
+function parseBoolean2(value) {
   if (typeof value !== "string") return void 0;
   if (/^(?:1|true|yes|on)$/iu.test(value.trim())) return true;
   if (/^(?:0|false|no|off)$/iu.test(value.trim())) return false;
@@ -1582,7 +1675,7 @@ function debugClassification(env, target, result, blocked, extra = {}) {
   });
 }
 function debugLog(env, event, fields = {}) {
-  if (!(parseBoolean(env.SILMARIL_DEBUG) ?? false)) return;
+  if (!(parseBoolean2(env.SILMARIL_DEBUG) ?? false)) return;
   process.stderr.write(`[silmaril] ${JSON.stringify(omitUndefined3({ event, ...fields }))}
 `);
 }
@@ -1621,6 +1714,7 @@ export {
   PLUGIN_VERSION,
   buildCursorTargets,
   buildLocalProtectionEvent,
+  configurationPath,
   consumeOutputDecision,
   readCursorTranscriptSegments,
   resolveLocalEventDirectory,

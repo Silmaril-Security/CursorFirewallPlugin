@@ -77,7 +77,8 @@ export function buildLocalProtectionEvent(input: LocalEvidenceInput): LocalProte
     host: "cursor",
     hook: input.hook,
     mode: input.mode,
-    requestFingerprint: fingerprint("request", input.requestId),
+    requestFingerprint: runtimeRequestFingerprint(input.requestId)
+      ?? fingerprint("request", input.requestId),
     sessionFingerprint: fingerprint("session", input.sessionId),
     toolDisplayName: safeToolName(input.toolName),
     riskClass,
@@ -181,6 +182,13 @@ function safeToolName(value: unknown): string | undefined {
 
 function fingerprint(namespace: string, value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? sha256(`${namespace}:${value}`) : undefined;
+}
+
+function runtimeRequestFingerprint(value: unknown): string | undefined {
+  return typeof value === "string"
+      && /^silmaril-runtime-check:[0-9a-f-]{36}$/iu.test(value)
+    ? sha256(value)
+    : undefined;
 }
 
 function stableId(namespace: string, ...values: Array<string | undefined>): string {

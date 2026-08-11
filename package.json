@@ -1,6 +1,6 @@
 {
   "name": "@silmaril/cursor-firewall-plugin",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Silmaril Firewall lifecycle protection for Cursor agents and subagents.",
   "type": "module",
   "private": true,
@@ -12,6 +12,7 @@
     ".cursor-plugin",
     "dist",
     "hooks",
+    "scripts/install-local.mjs",
     "scripts/open-playground.mjs",
     "skills",
     "README.md",
@@ -24,6 +25,7 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "npm run typecheck",
+    "install:local": "npm run build && node scripts/install-local.mjs",
     "test": "npm run build && node --test test/*.test.mjs",
     "pack:dry": "npm pack --dry-run",
     "prepack": "npm run build"
