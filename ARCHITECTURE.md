@@ -16,7 +16,7 @@ Subagent completion reads at most 2 MiB and classifies at most the latest 256 ho
 
 ## Trust boundaries
 
-Raw lifecycle content is sent only to the configured Silmaril Firewall endpoint through the SDK. It is not written locally. Local evidence carries only hashes, bounded taxonomy values, numeric scores, native actions, and version provenance. API keys and endpoints come from the private user-owned configuration file when it exists, with environment variables retained only as a fallback when the file is unavailable. They are excluded from logs and evidence. The runtime rejects symbolic links, oversized files, non-regular files, files owned by another user, and files with group or world permissions.
+Raw lifecycle content is sent only to the configured Silmaril Firewall endpoint through the SDK. It is not written locally. Local evidence carries only hashes, bounded taxonomy values, numeric scores, native actions, and version provenance. API keys and endpoints come from the private user-owned configuration file when it exists, with environment variables retained only as a fallback when the file is missing. They are excluded from logs and evidence. The runtime rejects symbolic links, oversized files, non-regular files, files owned by another user, invalid recognized fields, and files with group or world permissions.
 
 Local installation uses an atomic, non-symlinked copy under `~/.cursor/plugins/local`. Only package allowlisted files are copied, so Cursor never scans the development checkout or `node_modules` and the source checkout remains independent from the active installation.
 

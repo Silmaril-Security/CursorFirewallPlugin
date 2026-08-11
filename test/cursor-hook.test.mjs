@@ -117,8 +117,30 @@ test("runtime config treats a private host file as authoritative", async () => {
     debug: true,
   });
 
+  await writeFile(configPath, JSON.stringify({
+    apiKey: "file-key",
+    apiUrl: "https://file.example/classify",
+  }), { mode: 0o600 });
+  assert.deepEqual(resolveRuntimeConfig({
+    SILMARIL_CONFIG_PATH: configPath,
+    SILMARIL_ENABLED: "false",
+    SILMARIL_API_KEY: "stale-key",
+    SILMARIL_API_URL: "https://stale.example/classify",
+    SILMARIL_TIMEOUT_MS: "9000",
+    SILMARIL_BLOCK_MALICIOUS: "true",
+  }), {
+    apiKey: "file-key",
+    apiUrl: "https://file.example/classify",
+    timeoutMs: 2500,
+    blockMalicious: false,
+    debug: false,
+  });
+
   await chmod(configPath, 0o644);
-  assert.equal(resolveRuntimeConfig({ SILMARIL_CONFIG_PATH: configPath }), undefined);
+  assert.equal(resolveRuntimeConfig({
+    ...BASE_ENV,
+    SILMARIL_CONFIG_PATH: configPath,
+  }), undefined);
   await chmod(configPath, 0o600);
   const symlinkPath = path.join(root, "linked.json");
   await symlink(configPath, symlinkPath);

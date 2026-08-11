@@ -1043,18 +1043,34 @@ var MIN_TIMEOUT_MS = 250;
 var MAX_TIMEOUT_MS = 1e4;
 var MAX_CONFIG_BYTES = 64 * 1024;
 function resolveRuntimeConfig(env = process.env) {
-  const file = readFileConfig(configurationPath(env));
-  const enabled = file?.enabled ?? parseBoolean(env.SILMARIL_ENABLED) ?? true;
+  const fileResult = readFileConfig(configurationPath(env));
+  if (fileResult.state === "invalid") return void 0;
+  if (fileResult.state === "valid") {
+    const file = fileResult.config;
+    const enabled2 = file.enabled ?? true;
+    if (!enabled2) return void 0;
+    const apiKey2 = nonEmpty(file.apiKey);
+    const apiUrl2 = nonEmpty(file.apiUrl);
+    if (!apiKey2 || !apiUrl2) return void 0;
+    return {
+      apiKey: apiKey2,
+      apiUrl: apiUrl2,
+      timeoutMs: file.timeoutMs ?? DEFAULT_TIMEOUT_MS2,
+      blockMalicious: file.blockMalicious ?? false,
+      debug: parseBoolean(env.SILMARIL_DEBUG) ?? file.debug ?? false
+    };
+  }
+  const enabled = parseBoolean(env.SILMARIL_ENABLED) ?? true;
   if (!enabled) return void 0;
-  const apiKey = nonEmpty(file?.apiKey) ?? nonEmpty(env.SILMARIL_API_KEY);
-  const apiUrl = nonEmpty(file?.apiUrl) ?? nonEmpty(env.SILMARIL_API_URL);
+  const apiKey = nonEmpty(env.SILMARIL_API_KEY);
+  const apiUrl = nonEmpty(env.SILMARIL_API_URL);
   if (!apiKey || !apiUrl) return void 0;
   return {
     apiKey,
     apiUrl,
-    timeoutMs: integerInRange(file?.timeoutMs) ?? integerInRange(env.SILMARIL_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS2,
-    blockMalicious: file?.blockMalicious ?? parseBoolean(env.SILMARIL_BLOCK_MALICIOUS) ?? false,
-    debug: parseBoolean(env.SILMARIL_DEBUG) ?? file?.debug ?? false
+    timeoutMs: integerInRange(env.SILMARIL_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS2,
+    blockMalicious: parseBoolean(env.SILMARIL_BLOCK_MALICIOUS) ?? false,
+    debug: parseBoolean(env.SILMARIL_DEBUG) ?? false
   };
 }
 function configurationPath(env = process.env) {
@@ -1066,33 +1082,41 @@ function readFileConfig(path3) {
     descriptor = openSync(path3, constants.O_RDONLY | constants.O_NOFOLLOW);
     const metadata = fstatSync(descriptor);
     if (!metadata.isFile() || metadata.size > MAX_CONFIG_BYTES || (metadata.mode & 63) !== 0) {
-      return void 0;
+      return { state: "invalid" };
     }
     if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) {
-      return void 0;
+      return { state: "invalid" };
     }
     const parsed = JSON.parse(readFileSync(descriptor, "utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { state: "invalid" };
+    }
     const record = parsed;
     const config = {};
     const enabled = booleanValue(record.enabled);
     const apiKey = stringValue(record.apiKey);
     const apiUrl = stringValue(record.apiUrl);
-    const timeoutMs = numberValue(record.timeoutMs);
+    const timeoutMs = typeof record.timeoutMs === "number" ? integerInRange(record.timeoutMs) : void 0;
     const blockMalicious = booleanValue(record.blockMalicious);
     const debug = booleanValue(record.debug);
+    if (Object.hasOwn(record, "enabled") && enabled === void 0 || Object.hasOwn(record, "apiKey") && apiKey === void 0 || Object.hasOwn(record, "apiUrl") && apiUrl === void 0 || Object.hasOwn(record, "timeoutMs") && timeoutMs === void 0 || Object.hasOwn(record, "blockMalicious") && blockMalicious === void 0 || Object.hasOwn(record, "debug") && debug === void 0) {
+      return { state: "invalid" };
+    }
     if (enabled !== void 0) config.enabled = enabled;
     if (apiKey !== void 0) config.apiKey = apiKey;
     if (apiUrl !== void 0) config.apiUrl = apiUrl;
     if (timeoutMs !== void 0) config.timeoutMs = timeoutMs;
     if (blockMalicious !== void 0) config.blockMalicious = blockMalicious;
     if (debug !== void 0) config.debug = debug;
-    return config;
-  } catch {
-    return void 0;
+    return { state: "valid", config };
+  } catch (error) {
+    return isMissingFileError(error) ? { state: "missing" } : { state: "invalid" };
   } finally {
     if (descriptor !== void 0) closeSync(descriptor);
   }
+}
+function isMissingFileError(error) {
+  return error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
 }
 function integerInRange(value) {
   const parsed = typeof value === "string" && value.trim() ? Number(value) : value;
@@ -1111,9 +1135,6 @@ function nonEmpty(value) {
 }
 function stringValue(value) {
   return typeof value === "string" ? value : void 0;
-}
-function numberValue(value) {
-  return typeof value === "number" ? value : void 0;
 }
 function booleanValue(value) {
   return typeof value === "boolean" ? value : void 0;
