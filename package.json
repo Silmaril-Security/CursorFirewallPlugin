@@ -1,6 +1,6 @@
 {
   "name": "@silmaril/cursor-firewall-plugin",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Silmaril Firewall lifecycle protection for Cursor agents and subagents.",
   "type": "module",
   "private": true,

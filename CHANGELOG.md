@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3
+
+- Add app-managed endpoint and harness provenance to every Firewall request.
+
 ## 0.1.2
 
 - Make the private app-managed configuration authoritative over stale ambient shell variables.
