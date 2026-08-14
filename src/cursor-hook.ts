@@ -21,7 +21,7 @@ export { buildLocalProtectionEvent, resolveLocalEventDirectory, writeLocalProtec
 export { configurationPath, resolveRuntimeConfig } from "./runtime-config.js";
 
 export const PLUGIN_NAME = "cursor-firewall-plugin";
-export const PLUGIN_VERSION = "0.1.2";
+export const PLUGIN_VERSION = "0.1.3";
 const MAX_STDIN_BYTES = 4 * 1024 * 1024;
 const MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 const MAX_TRANSCRIPT_SEGMENTS = 256;
@@ -99,7 +99,7 @@ export async function runCursorHook(
       apiUrl: config.apiUrl,
       timeoutMs: config.timeoutMs,
     });
-    classified = await classifyTargets(firewall, targets);
+    classified = await classifyTargets(firewall, targets, config.endpointId);
   } catch (error) {
     debugLog(env, "classification_error", { hookEventName, targetCount: targets.length, ...safeErrorFields(error) });
     return undefined;
@@ -186,11 +186,12 @@ export function buildCursorTargets(input: HookRecord): Target[] {
 async function classifyTargets(
   firewall: FirewallClient,
   targets: Target[],
+  endpointId?: string,
 ): Promise<Array<{ target: Target; result: ClassificationResult }>> {
   if (targets.length === 1 || !firewall.classifyBatch) {
     return Promise.all(targets.map(async (target) => ({
       target,
-      result: await firewall.classify(target.text, classifyOptions(target)),
+      result: await firewall.classify(target.text, classifyOptions(target, endpointId)),
     })));
   }
 
@@ -202,7 +203,7 @@ async function classifyTargets(
       {
         hooks: batch.map((target) => target.firewallHook),
         toolNames: batch.map((target) => target.toolName),
-        metadata: batch.map((target) => target.metadata),
+        metadata: batch.map((target) => withProvenance(target.metadata, endpointId)),
         requestId: `cursor-batch-${sha256(batch.map((target) => target.requestId).join("\u0000"))}`,
       },
     );
@@ -416,12 +417,29 @@ function messageSegment(text: string, role: string | undefined): TranscriptSegme
     : { text, firewallHook: HookLabel.USER_INPUT, evidenceHook: "subagent", source: "message" };
 }
 
-function classifyOptions(target: Target): ClassifyOptions {
+function classifyOptions(target: Target, endpointId?: string): ClassifyOptions {
   return {
     hook: target.firewallHook,
     ...(target.toolName ? { toolName: target.toolName } : {}),
-    metadata: target.metadata,
+    metadata: withProvenance(target.metadata, endpointId),
     requestId: target.requestId,
+  };
+}
+
+export function withProvenance(metadata: Record<string, unknown>, endpointId?: string): Record<string, unknown> {
+  const existingSilmaril = metadata.silmaril && typeof metadata.silmaril === "object" && !Array.isArray(metadata.silmaril)
+    ? metadata.silmaril as Record<string, unknown>
+    : {};
+  return {
+    ...metadata,
+    silmaril: {
+      ...existingSilmaril,
+      provenance: {
+        schema_version: 1,
+        ...(endpointId ? { endpoint_id: endpointId } : {}),
+        harness: "cursor",
+      },
+    },
   };
 }
 

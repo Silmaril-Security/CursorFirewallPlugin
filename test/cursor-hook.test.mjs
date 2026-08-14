@@ -13,6 +13,7 @@ import {
   readCursorTranscriptSegments,
   resolveRuntimeConfig,
   runCursorHook,
+  withProvenance,
   writeLocalProtectionEvent,
   writeOutputDecision,
 } from "../dist/cursor-hook.js";
@@ -82,6 +83,31 @@ test("runtime config defaults and rejects incomplete configuration", async () =>
   });
   assert.equal(resolveRuntimeConfig({ ...BASE_ENV, SILMARIL_TIMEOUT_MS: "249" }).timeoutMs, 2500);
   assert.equal(resolveRuntimeConfig({ ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "yes" }).blockMalicious, true);
+  assert.equal(resolveRuntimeConfig({
+    ...BASE_ENV,
+    SILMARIL_ENDPOINT_ID: "2b64e603-f82a-4aec-9524-9736472dc80a",
+  }).endpointId, "2b64e603-f82a-4aec-9524-9736472dc80a");
+  assert.equal(resolveRuntimeConfig({ ...BASE_ENV, SILMARIL_ENDPOINT_ID: "NOT-A-UUID" }).endpointId, undefined);
+});
+
+test("plugin-owned provenance overwrites caller values and preserves unrelated metadata", () => {
+  assert.deepEqual(withProvenance({
+    trace: "keep",
+    silmaril: { integration: "cursor-firewall-plugin", provenance: { endpoint_id: "spoofed", harness: "spoofed" } },
+  }, "2b64e603-f82a-4aec-9524-9736472dc80a"), {
+    trace: "keep",
+    silmaril: {
+      integration: "cursor-firewall-plugin",
+      provenance: {
+        schema_version: 1,
+        endpoint_id: "2b64e603-f82a-4aec-9524-9736472dc80a",
+        harness: "cursor",
+      },
+    },
+  });
+  assert.deepEqual(withProvenance({}), {
+    silmaril: { provenance: { schema_version: 1, harness: "cursor" } },
+  });
 });
 
 test("runtime config treats a private host file as authoritative", async () => {
@@ -356,7 +382,7 @@ test("local evidence is redacted and written atomically with private permissions
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-evidence-"));
   const event = buildLocalProtectionEvent({
     pluginName: "cursor-firewall-plugin",
-    pluginVersion: "0.1.2",
+    pluginVersion: "0.1.3",
     hook: "user_input",
     mode: "block",
     requestId: "raw-request-id",
@@ -422,7 +448,7 @@ test("package and Cursor manifests preserve release invariants", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const pluginJson = JSON.parse(await readFile(new URL("../.cursor-plugin/plugin.json", import.meta.url), "utf8"));
   const hooksJson = JSON.parse(await readFile(new URL("../hooks/hooks.json", import.meta.url), "utf8"));
-  assert.equal(packageJson.version, "0.1.2");
+  assert.equal(packageJson.version, "0.1.3");
   assert.equal(pluginJson.version, packageJson.version);
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.5.0");
   assert.equal(packageJson.private, true);

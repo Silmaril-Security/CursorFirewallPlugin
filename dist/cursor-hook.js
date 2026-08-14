@@ -1052,9 +1052,11 @@ function resolveRuntimeConfig(env = process.env) {
     const apiKey2 = nonEmpty(file.apiKey);
     const apiUrl2 = nonEmpty(file.apiUrl);
     if (!apiKey2 || !apiUrl2) return void 0;
+    const configuredEndpointId2 = endpointId(file.endpointId);
     return {
       apiKey: apiKey2,
       apiUrl: apiUrl2,
+      ...configuredEndpointId2 ? { endpointId: configuredEndpointId2 } : {},
       timeoutMs: file.timeoutMs ?? DEFAULT_TIMEOUT_MS2,
       blockMalicious: file.blockMalicious ?? false,
       debug: parseBoolean(env.SILMARIL_DEBUG) ?? file.debug ?? false
@@ -1065,9 +1067,11 @@ function resolveRuntimeConfig(env = process.env) {
   const apiKey = nonEmpty(env.SILMARIL_API_KEY);
   const apiUrl = nonEmpty(env.SILMARIL_API_URL);
   if (!apiKey || !apiUrl) return void 0;
+  const configuredEndpointId = endpointId(env.SILMARIL_ENDPOINT_ID);
   return {
     apiKey,
     apiUrl,
+    ...configuredEndpointId ? { endpointId: configuredEndpointId } : {},
     timeoutMs: integerInRange(env.SILMARIL_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS2,
     blockMalicious: parseBoolean(env.SILMARIL_BLOCK_MALICIOUS) ?? false,
     debug: parseBoolean(env.SILMARIL_DEBUG) ?? false
@@ -1096,6 +1100,7 @@ function readFileConfig(path3) {
     const enabled = booleanValue(record.enabled);
     const apiKey = stringValue(record.apiKey);
     const apiUrl = stringValue(record.apiUrl);
+    const endpointIdValue = stringValue(record.endpointId);
     const timeoutMs = typeof record.timeoutMs === "number" ? integerInRange(record.timeoutMs) : void 0;
     const blockMalicious = booleanValue(record.blockMalicious);
     const debug = booleanValue(record.debug);
@@ -1105,6 +1110,7 @@ function readFileConfig(path3) {
     if (enabled !== void 0) config.enabled = enabled;
     if (apiKey !== void 0) config.apiKey = apiKey;
     if (apiUrl !== void 0) config.apiUrl = apiUrl;
+    if (endpointIdValue !== void 0) config.endpointId = endpointIdValue;
     if (timeoutMs !== void 0) config.timeoutMs = timeoutMs;
     if (blockMalicious !== void 0) config.blockMalicious = blockMalicious;
     if (debug !== void 0) config.debug = debug;
@@ -1135,6 +1141,10 @@ function nonEmpty(value) {
 }
 function stringValue(value) {
   return typeof value === "string" ? value : void 0;
+}
+function endpointId(value) {
+  const candidate = nonEmpty(value);
+  return candidate && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(candidate) ? candidate : void 0;
 }
 function booleanValue(value) {
   return typeof value === "boolean" ? value : void 0;
@@ -1282,7 +1292,7 @@ function omitUndefined2(value) {
 
 // src/cursor-hook.ts
 var PLUGIN_NAME = "cursor-firewall-plugin";
-var PLUGIN_VERSION = "0.1.2";
+var PLUGIN_VERSION = "0.1.3";
 var MAX_STDIN_BYTES = 4 * 1024 * 1024;
 var MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 var MAX_TRANSCRIPT_SEGMENTS = 256;
@@ -1319,7 +1329,7 @@ async function runCursorHook(input, env = process.env, dependencies = {}) {
       apiUrl: config.apiUrl,
       timeoutMs: config.timeoutMs
     });
-    classified = await classifyTargets(firewall, targets);
+    classified = await classifyTargets(firewall, targets, config.endpointId);
   } catch (error) {
     debugLog(env, "classification_error", { hookEventName, targetCount: targets.length, ...safeErrorFields(error) });
     return void 0;
@@ -1388,11 +1398,11 @@ function buildCursorTargets(input) {
       return [];
   }
 }
-async function classifyTargets(firewall, targets) {
+async function classifyTargets(firewall, targets, endpointId2) {
   if (targets.length === 1 || !firewall.classifyBatch) {
     return Promise.all(targets.map(async (target) => ({
       target,
-      result: await firewall.classify(target.text, classifyOptions(target))
+      result: await firewall.classify(target.text, classifyOptions(target, endpointId2))
     })));
   }
   const classified = [];
@@ -1403,7 +1413,7 @@ async function classifyTargets(firewall, targets) {
       {
         hooks: batch.map((target) => target.firewallHook),
         toolNames: batch.map((target) => target.toolName),
-        metadata: batch.map((target) => target.metadata),
+        metadata: batch.map((target) => withProvenance(target.metadata, endpointId2)),
         requestId: `cursor-batch-${sha2563(batch.map((target) => target.requestId).join("\0"))}`
       }
     );
@@ -1576,12 +1586,26 @@ function readCursorTranscriptSegments(transcriptPath) {
 function messageSegment(text, role) {
   return role === "assistant" ? { text, firewallHook: HookLabel.LLM_OUTPUT, evidenceHook: "subagent", source: "message" } : { text, firewallHook: HookLabel.USER_INPUT, evidenceHook: "subagent", source: "message" };
 }
-function classifyOptions(target) {
+function classifyOptions(target, endpointId2) {
   return {
     hook: target.firewallHook,
     ...target.toolName ? { toolName: target.toolName } : {},
-    metadata: target.metadata,
+    metadata: withProvenance(target.metadata, endpointId2),
     requestId: target.requestId
+  };
+}
+function withProvenance(metadata, endpointId2) {
+  const existingSilmaril = metadata.silmaril && typeof metadata.silmaril === "object" && !Array.isArray(metadata.silmaril) ? metadata.silmaril : {};
+  return {
+    ...metadata,
+    silmaril: {
+      ...existingSilmaril,
+      provenance: {
+        schema_version: 1,
+        ...endpointId2 ? { endpoint_id: endpointId2 } : {},
+        harness: "cursor"
+      }
+    }
   };
 }
 function buildMetadata(input, extra) {
@@ -1720,6 +1744,7 @@ export {
   resolveLocalEventDirectory,
   resolveRuntimeConfig,
   runCursorHook,
+  withProvenance,
   writeLocalProtectionEvent,
   writeOutputDecision
 };
