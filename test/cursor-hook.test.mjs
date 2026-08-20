@@ -429,7 +429,7 @@ test("local evidence is redacted and written atomically with private permissions
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-evidence-"));
   const event = buildLocalProtectionEvent({
     pluginName: "cursor-firewall-plugin",
-    pluginVersion: "0.1.3",
+    pluginVersion: "0.1.4",
     hook: "user_input",
     mode: "block",
     requestId: "raw-request-id",
@@ -495,7 +495,7 @@ test("package and Cursor manifests preserve release invariants", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const pluginJson = JSON.parse(await readFile(new URL("../.cursor-plugin/plugin.json", import.meta.url), "utf8"));
   const hooksJson = JSON.parse(await readFile(new URL("../hooks/hooks.json", import.meta.url), "utf8"));
-  assert.equal(packageJson.version, "0.1.3");
+  assert.equal(packageJson.version, "0.1.4");
   assert.equal(pluginJson.version, packageJson.version);
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.5.0");
   assert.equal(packageJson.private, true);

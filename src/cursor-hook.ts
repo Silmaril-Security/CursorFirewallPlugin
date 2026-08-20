@@ -21,7 +21,7 @@ export { buildLocalProtectionEvent, resolveLocalEventDirectory, writeLocalProtec
 export { configurationPath, resolveRuntimeConfig } from "./runtime-config.js";
 
 export const PLUGIN_NAME = "cursor-firewall-plugin";
-export const PLUGIN_VERSION = "0.1.3";
+export const PLUGIN_VERSION = "0.1.4";
 const MAX_STDIN_BYTES = 4 * 1024 * 1024;
 const MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 const MAX_TRANSCRIPT_SEGMENTS = 256;

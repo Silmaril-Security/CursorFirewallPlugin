@@ -1292,7 +1292,7 @@ function omitUndefined2(value) {
 
 // src/cursor-hook.ts
 var PLUGIN_NAME = "cursor-firewall-plugin";
-var PLUGIN_VERSION = "0.1.3";
+var PLUGIN_VERSION = "0.1.4";
 var MAX_STDIN_BYTES = 4 * 1024 * 1024;
 var MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 var MAX_TRANSCRIPT_SEGMENTS = 256;

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4
+
+- Classify each visible Cursor transcript segment individually while preserving bounded concurrency and fail-open behavior.
+
 ## 0.1.3
 
 - Add app-managed endpoint and harness provenance to every Firewall request.
