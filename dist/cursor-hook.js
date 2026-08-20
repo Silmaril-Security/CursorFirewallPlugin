@@ -1399,28 +1399,10 @@ function buildCursorTargets(input) {
   }
 }
 async function classifyTargets(firewall, targets, endpointId2) {
-  if (targets.length === 1 || !firewall.classifyBatch) {
-    return Promise.all(targets.map(async (target) => ({
-      target,
-      result: await firewall.classify(target.text, classifyOptions(target, endpointId2))
-    })));
-  }
-  const classified = [];
-  for (let offset = 0; offset < targets.length; offset += MAX_TRANSCRIPT_SEGMENTS) {
-    const batch = targets.slice(offset, offset + MAX_TRANSCRIPT_SEGMENTS);
-    const results = await firewall.classifyBatch(
-      batch.map((target) => target.text),
-      {
-        hooks: batch.map((target) => target.firewallHook),
-        toolNames: batch.map((target) => target.toolName),
-        metadata: batch.map((target) => withProvenance(target.metadata, endpointId2)),
-        requestId: `cursor-batch-${sha2563(batch.map((target) => target.requestId).join("\0"))}`
-      }
-    );
-    if (results.length !== batch.length) throw new Error("Firewall batch result length mismatch");
-    batch.forEach((target, index) => classified.push({ target, result: results[index] ?? {} }));
-  }
-  return classified;
+  return Promise.all(targets.map(async (target) => ({
+    target,
+    result: await firewall.classify(target.text, classifyOptions(target, endpointId2))
+  })));
 }
 async function handleAgentResponse(entry, config, env, deps) {
   if (!entry) return void 0;

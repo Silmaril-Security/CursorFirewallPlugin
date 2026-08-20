@@ -30,10 +30,8 @@ const SAFE_FOLLOWUP_MESSAGE = "Silmaril Firewall blocked the previous output. Co
 
 type ClassificationResult = Record<string, unknown>;
 type ClassifyOptions = { hook?: string; toolName?: string; metadata?: Record<string, unknown>; requestId?: string };
-type ClassifyBatchOptions = { hooks?: string[]; toolNames?: Array<string | undefined>; metadata?: Array<Record<string, unknown>>; requestId?: string };
 type FirewallClient = {
   classify(text: string, options?: ClassifyOptions): Promise<ClassificationResult>;
-  classifyBatch?(texts: string[], options?: ClassifyBatchOptions): Promise<ClassificationResult[]>;
 };
 type FirewallConstructor = new (options: FirewallOptions) => FirewallClient;
 type HookRecord = Record<string, unknown>;
@@ -188,29 +186,10 @@ async function classifyTargets(
   targets: Target[],
   endpointId?: string,
 ): Promise<Array<{ target: Target; result: ClassificationResult }>> {
-  if (targets.length === 1 || !firewall.classifyBatch) {
-    return Promise.all(targets.map(async (target) => ({
-      target,
-      result: await firewall.classify(target.text, classifyOptions(target, endpointId)),
-    })));
-  }
-
-  const classified: Array<{ target: Target; result: ClassificationResult }> = [];
-  for (let offset = 0; offset < targets.length; offset += MAX_TRANSCRIPT_SEGMENTS) {
-    const batch = targets.slice(offset, offset + MAX_TRANSCRIPT_SEGMENTS);
-    const results = await firewall.classifyBatch(
-      batch.map((target) => target.text),
-      {
-        hooks: batch.map((target) => target.firewallHook),
-        toolNames: batch.map((target) => target.toolName),
-        metadata: batch.map((target) => withProvenance(target.metadata, endpointId)),
-        requestId: `cursor-batch-${sha256(batch.map((target) => target.requestId).join("\u0000"))}`,
-      },
-    );
-    if (results.length !== batch.length) throw new Error("Firewall batch result length mismatch");
-    batch.forEach((target, index) => classified.push({ target, result: results[index] ?? {} }));
-  }
-  return classified;
+  return Promise.all(targets.map(async (target) => ({
+    target,
+    result: await firewall.classify(target.text, classifyOptions(target, endpointId)),
+  })));
 }
 
 async function handleAgentResponse(

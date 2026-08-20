@@ -58,7 +58,7 @@ function fakeFirewall(results, calls = []) {
     }
     async classifyBatch(texts, options) {
       calls.push({ texts, options });
-      return texts.map(() => results.shift() ?? { prediction: "BENIGN", score: 0.01, threshold: 0.5 });
+      throw new Error("Plugin runtime must not call classifyBatch");
     }
   };
 }
@@ -375,7 +375,54 @@ test("subagent transcript classifies messages, reasoning, calls, and results", a
     captureDependencies(results, [], calls),
   );
   assert.match(output.followup_message, /blocked the previous output/u);
-  assert.equal(calls.find((call) => call.texts)?.texts.length, segments.length);
+  const classificationCalls = calls.filter((call) => Object.hasOwn(call, "text"));
+  assert.equal(classificationCalls.length, segments.length);
+  assert.equal(calls.some((call) => Object.hasOwn(call, "texts")), false);
+  assert.deepEqual(classificationCalls.map((call) => call.text), segments.map((segment) => segment.text));
+  assert.deepEqual(classificationCalls.map((call) => call.options.hook), segments.map((segment) => segment.firewallHook));
+  assert.equal(new Set(classificationCalls.map((call) => call.options.requestId)).size, segments.length);
+  assert.ok(classificationCalls.every((call) => typeof call.text === "string"));
+});
+
+test("subagent transcript starts individual calls concurrently", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-concurrent-"));
+  const transcript = path.join(root, "child.jsonl");
+  await writeFile(transcript, [
+    JSON.stringify({ message: { role: "user", content: "request" } }),
+    JSON.stringify({ message: { role: "assistant", content: "summary" } }),
+  ].join("\n"));
+  const segments = readCursorTranscriptSegments(transcript);
+  let releaseGate = () => {};
+  const gate = new Promise((resolve) => { releaseGate = resolve; });
+  const calls = [];
+  let batchCalls = 0;
+  class ConcurrentFirewall {
+    constructor(options) {
+      calls.push({ constructor: options });
+    }
+    async classify(text, options) {
+      calls.push({ text, options });
+      await gate;
+      return { prediction: "BENIGN" };
+    }
+    async classifyBatch() {
+      batchCalls += 1;
+      throw new Error("classifyBatch must not be called");
+    }
+  }
+
+  const pending = runCursorHook(
+    hookInput("subagentStop", { status: "completed", loop_count: 0, agent_transcript_path: transcript }),
+    BASE_ENV,
+    { firewallConstructor: ConcurrentFirewall, evidenceEmitter: async () => undefined },
+  );
+  try {
+    assert.equal(calls.filter((call) => Object.hasOwn(call, "text")).length, segments.length);
+    assert.equal(batchCalls, 0);
+  } finally {
+    releaseGate();
+  }
+  await pending;
 });
 
 test("local evidence is redacted and written atomically with private permissions", async () => {
