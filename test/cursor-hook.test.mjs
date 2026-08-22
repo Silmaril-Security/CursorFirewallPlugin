@@ -74,6 +74,8 @@ function captureDependencies(results, events = [], calls = []) {
 test("configured pilot override wins and backend mode controls otherwise", () => {
   assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "warn" }, "block"), "block");
   assert.equal(effectiveMode({ prediction: "MALICIOUS" }, "block"), "block");
+  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "block" }, "warn"), "block");
+  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "warn" }, "shadow"), "shadow");
   assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "warn" }), "warn");
   assert.equal(effectiveMode({ prediction: "MALICIOUS" }), "shadow");
 });
