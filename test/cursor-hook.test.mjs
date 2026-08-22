@@ -10,6 +10,7 @@ import {
   buildCursorTargets,
   buildLocalProtectionEvent,
   consumeOutputDecision,
+  effectiveMode,
   readCursorTranscriptSegments,
   resolveRuntimeConfig,
   runCursorHook,
@@ -70,6 +71,15 @@ function captureDependencies(results, events = [], calls = []) {
   };
 }
 
+test("configured pilot override wins and backend mode controls otherwise", () => {
+  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "warn" }, "block"), "block");
+  assert.equal(effectiveMode({ prediction: "MALICIOUS" }, "block"), "block");
+  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "block" }, "warn"), "warn");
+  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "warn" }, "shadow"), "shadow");
+  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "warn" }), "warn");
+  assert.equal(effectiveMode({ prediction: "MALICIOUS" }), "shadow");
+});
+
 test("runtime config defaults and rejects incomplete configuration", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-missing-config-"));
   const missingConfig = path.join(root, "missing.json");
@@ -78,6 +88,7 @@ test("runtime config defaults and rejects incomplete configuration", async () =>
     apiKey: "test-key",
     apiUrl: "https://firewall.example/classify",
     timeoutMs: 2500,
+    mode: "shadow",
     blockMalicious: false,
     debug: false,
   });
@@ -118,6 +129,7 @@ test("runtime config treats a private host file as authoritative", async () => {
     apiKey: "file-key",
     apiUrl: "https://file.example/classify",
     timeoutMs: 375,
+    mode: "block",
     blockMalicious: true,
     debug: true,
   }), { mode: 0o600 });
@@ -125,6 +137,7 @@ test("runtime config treats a private host file as authoritative", async () => {
     apiKey: "file-key",
     apiUrl: "https://file.example/classify",
     timeoutMs: 375,
+    mode: "block",
     blockMalicious: true,
     debug: true,
   });
@@ -139,6 +152,7 @@ test("runtime config treats a private host file as authoritative", async () => {
     apiKey: "file-key",
     apiUrl: "https://file.example/classify",
     timeoutMs: 375,
+    mode: "block",
     blockMalicious: true,
     debug: true,
   });
@@ -260,20 +274,40 @@ test("beforeReadFile blocks before model consumption", async () => {
   assert.equal(output.permission, "deny");
 });
 
-test("postToolUse only replaces MCP output", async () => {
+test("postToolUse never replaces content and records unavailable block", async () => {
   const env = { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" };
+  const events = [];
   const generic = await runCursorHook(
     hookInput("postToolUse", { tool_name: "Shell", tool_output: "unsafe" }),
     env,
-    captureDependencies([{ prediction: "MALICIOUS" }]),
+    captureDependencies([{ prediction: "MALICIOUS" }], events),
   );
   assert.equal(generic, undefined);
   const mcp = await runCursorHook(
     hookInput("postToolUse", { tool_name: "MCP:fetch", tool_output: "unsafe" }),
     env,
-    captureDependencies([{ prediction: "MALICIOUS" }]),
+    captureDependencies([{ prediction: "MALICIOUS" }], events),
   );
-  assert.equal(mcp.updated_mcp_tool_output.error, "Silmaril Firewall blocked potentially malicious content.");
+  assert.equal(mcp, undefined);
+  assert.ok(events.every((event) => event.blockUnavailable === true));
+});
+
+test("warn mode remains unchanged where Cursor cannot deliver same-turn context", async () => {
+  const env = { ...BASE_ENV };
+  delete env.SILMARIL_BLOCK_MALICIOUS;
+  const events = [];
+  for (const input of [
+    hookInput("beforeSubmitPrompt", { prompt: "raw prompt" }),
+    hookInput("preToolUse", { tool_name: "Shell", tool_input: { command: "raw args" } }),
+    hookInput("postToolUse", { tool_name: "Shell", tool_output: "raw output" }),
+  ]) {
+    assert.equal(
+      await runCursorHook(input, env, captureDependencies([{ prediction: "MALICIOUS", mode: "warn" }], events)),
+      undefined,
+    );
+  }
+  assert.ok(events.every((event) => event.mode === "warn" && event.warnDelivery === "unsupported"));
+  assert.doesNotMatch(JSON.stringify(events), /raw prompt|raw args|raw output/u);
 });
 
 test("configuration, network, timeout, SDK, and malformed-response paths fail open", async () => {
@@ -294,7 +328,7 @@ test("configuration, network, timeout, SDK, and malformed-response paths fail op
   ), undefined);
 });
 
-test("assistant output uses bounded decision cache and stop follow-up", async () => {
+test("assistant output does not use replacement or follow-up as a block", async () => {
   const env = { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" };
   const writes = [];
   const firstEvents = [];
@@ -310,9 +344,10 @@ test("assistant output uses bounded decision cache and stop follow-up", async ()
     },
   );
   assert.equal(responseOutput, undefined);
-  assert.equal(writes.length, 1);
+  assert.equal(writes.length, 0);
   assert.equal(firstEvents.length, 1);
   assert.equal(firstEvents[0].policyDecision, "monitor");
+  assert.equal(firstEvents[0].blockUnavailable, true);
 
   const stopEvents = [];
   const stopOutput = await runCursorHook(
@@ -331,9 +366,8 @@ test("assistant output uses bounded decision cache and stop follow-up", async ()
       }),
     },
   );
-  assert.match(stopOutput.followup_message, /blocked the previous output/u);
-  assert.equal(stopEvents[0].nativeAction, "block_returned");
-  assert.doesNotMatch(JSON.stringify(stopEvents), /raw assistant output/u);
+  assert.equal(stopOutput, undefined);
+  assert.equal(stopEvents.length, 0);
 });
 
 test("decision cache is private, bounded, single-use, and expires", async () => {
@@ -369,12 +403,15 @@ test("subagent transcript classifies messages, reasoning, calls, and results", a
 
   const results = segments.map((_, index) => index === 2 ? { prediction: "MALICIOUS" } : { prediction: "BENIGN" });
   const calls = [];
+  const events = [];
   const output = await runCursorHook(
     hookInput("subagentStop", { status: "completed", loop_count: 0, agent_transcript_path: transcript }),
     { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" },
-    captureDependencies(results, [], calls),
+    captureDependencies(results, events, calls),
   );
-  assert.match(output.followup_message, /blocked the previous output/u);
+  assert.equal(output, undefined);
+  assert.equal(events[2].blockUnavailable, true);
+  assert.equal(events[2].nativeAction, "allowed");
   const classificationCalls = calls.filter((call) => Object.hasOwn(call, "text"));
   assert.equal(classificationCalls.length, segments.length);
   assert.equal(calls.some((call) => Object.hasOwn(call, "texts")), false);
@@ -429,7 +466,7 @@ test("local evidence is redacted and written atomically with private permissions
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-evidence-"));
   const event = buildLocalProtectionEvent({
     pluginName: "cursor-firewall-plugin",
-    pluginVersion: "0.1.4",
+    pluginVersion: "0.2.0",
     hook: "user_input",
     mode: "block",
     requestId: "raw-request-id",
@@ -495,7 +532,7 @@ test("package and Cursor manifests preserve release invariants", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const pluginJson = JSON.parse(await readFile(new URL("../.cursor-plugin/plugin.json", import.meta.url), "utf8"));
   const hooksJson = JSON.parse(await readFile(new URL("../hooks/hooks.json", import.meta.url), "utf8"));
-  assert.equal(packageJson.version, "0.1.4");
+  assert.equal(packageJson.version, "0.2.0");
   assert.equal(pluginJson.version, packageJson.version);
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.5.0");
   assert.equal(packageJson.private, true);

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0
+
+- Add backend-controlled Shadow, Warn, and Block modes with explicit-mode precedence.
+- Surface bounded Warn context only where Cursor supports it and record unsupported Block boundaries without replacing content.
+
 ## 0.1.4
 
 - Classify each visible Cursor transcript segment individually while preserving bounded concurrency and fail-open behavior.

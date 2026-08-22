@@ -912,131 +912,9 @@ import { createHash as createHash3 } from "node:crypto";
 import { readFileSync as readFileSync2, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-// src/decision-cache.ts
-import { createHash, randomUUID as randomUUID2 } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
-import { homedir } from "node:os";
-import path from "node:path";
-var CACHE_VERSION = 1;
-var DEFAULT_TTL_MS = 10 * 60 * 1e3;
-var MAX_CACHE_BYTES = 4 * 1024;
-var MAX_CACHE_FILES_SCANNED = 128;
-async function writeOutputDecision(conversationId, generationId, classification, options = {}) {
-  const directory = options.directory ?? defaultCacheDirectory();
-  const decision = omitUndefined({
-    version: CACHE_VERSION,
-    createdAt: (options.now ?? /* @__PURE__ */ new Date()).toISOString(),
-    conversationFingerprint: fingerprint("conversation", conversationId),
-    generationFingerprint: fingerprint("generation", generationId),
-    prediction: "MALICIOUS",
-    score: unitInterval(classification.score),
-    threshold: unitInterval(classification.threshold),
-    primaryOutcome: boundedOutcome(classification.primaryOutcome ?? classification.primary_outcome)
-  });
-  const body = Buffer.from(`${JSON.stringify(decision)}
-`, "utf8");
-  if (body.byteLength > MAX_CACHE_BYTES) return false;
-  const destination = path.join(directory, cacheFileName(conversationId, generationId));
-  const temporary = path.join(directory, `.${path.basename(destination)}.${process.pid}.${randomUUID2()}.tmp`);
-  let handle;
-  try {
-    await mkdir(directory, { recursive: true, mode: 448 });
-    const directoryInfo = await lstat(directory);
-    if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) return false;
-    await chmod(directory, 448);
-    await cleanupExpiredOutputDecisions(directory, options.now ?? /* @__PURE__ */ new Date());
-    handle = await open(temporary, "wx", 384);
-    await handle.writeFile(body);
-    await handle.sync();
-    await handle.close();
-    handle = void 0;
-    await rename(temporary, destination);
-    await chmod(destination, 384);
-    return true;
-  } catch {
-    await handle?.close().catch(() => void 0);
-    await rm(temporary, { force: true }).catch(() => void 0);
-    return false;
-  }
-}
-async function consumeOutputDecision(conversationId, generationId, options = {}) {
-  const destination = path.join(options.directory ?? defaultCacheDirectory(), cacheFileName(conversationId, generationId));
-  try {
-    const encoded = await readFile(destination);
-    await rm(destination, { force: true });
-    if (encoded.byteLength > MAX_CACHE_BYTES) return void 0;
-    const value = JSON.parse(encoded.toString("utf8"));
-    if (!isCachedDecision(value)) return void 0;
-    const age = (options.now ?? /* @__PURE__ */ new Date()).getTime() - Date.parse(value.createdAt);
-    const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
-    if (!Number.isFinite(age) || age < 0 || age > ttlMs) return void 0;
-    if (value.conversationFingerprint !== fingerprint("conversation", conversationId)) return void 0;
-    if (value.generationFingerprint !== fingerprint("generation", generationId)) return void 0;
-    return value;
-  } catch {
-    await rm(destination, { force: true }).catch(() => void 0);
-    return void 0;
-  }
-}
-function defaultCacheDirectory(homeDirectory = homedir()) {
-  return path.join(homeDirectory, "Library", "Application Support", "Silmaril", "Cache", "CursorFirewall");
-}
-async function cleanupExpiredOutputDecisions(directory, now) {
-  let entries;
-  try {
-    entries = await readdir(directory);
-  } catch {
-    return;
-  }
-  for (const entry of entries.filter((name) => /^decision-[a-f0-9]{64}\.json$/u.test(name)).slice(0, MAX_CACHE_FILES_SCANNED)) {
-    const candidate = path.join(directory, entry);
-    try {
-      const encoded = await readFile(candidate);
-      if (encoded.byteLength > MAX_CACHE_BYTES) {
-        await rm(candidate, { force: true });
-        continue;
-      }
-      const value = JSON.parse(encoded.toString("utf8"));
-      if (!isCachedDecision(value)) {
-        await rm(candidate, { force: true });
-        continue;
-      }
-      const age = now.getTime() - Date.parse(value.createdAt);
-      if (!Number.isFinite(age) || age < 0 || age > DEFAULT_TTL_MS) await rm(candidate, { force: true });
-    } catch {
-      await rm(candidate, { force: true }).catch(() => void 0);
-    }
-  }
-}
-function cacheFileName(conversationId, generationId) {
-  return `decision-${sha256(`${conversationId}\0${generationId}`)}.json`;
-}
-function isCachedDecision(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value;
-  return record.version === 1 && record.prediction === "MALICIOUS" && typeof record.createdAt === "string" && typeof record.conversationFingerprint === "string" && typeof record.generationFingerprint === "string";
-}
-function boundedOutcome(value) {
-  if (typeof value !== "string") return void 0;
-  const normalized = value.trim().replace(/[^A-Za-z0-9_.-]/gu, "_");
-  return normalized ? normalized.slice(0, 128) : void 0;
-}
-function unitInterval(value) {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : void 0;
-}
-function fingerprint(namespace, value) {
-  return sha256(`${namespace}:${value}`);
-}
-function sha256(value) {
-  return createHash("sha256").update(value).digest("hex");
-}
-function omitUndefined(value) {
-  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== void 0));
-}
-
 // src/runtime-config.ts
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
-import { homedir as homedir2 } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 var DEFAULT_TIMEOUT_MS2 = 2500;
 var MIN_TIMEOUT_MS = 250;
@@ -1058,7 +936,7 @@ function resolveRuntimeConfig(env = process.env) {
       apiUrl: apiUrl2,
       ...configuredEndpointId2 ? { endpointId: configuredEndpointId2 } : {},
       timeoutMs: file.timeoutMs ?? DEFAULT_TIMEOUT_MS2,
-      blockMalicious: file.blockMalicious ?? false,
+      ...configuredMode(file.mode, file.blockMalicious),
       debug: parseBoolean(env.SILMARIL_DEBUG) ?? file.debug ?? false
     };
   }
@@ -1073,12 +951,12 @@ function resolveRuntimeConfig(env = process.env) {
     apiUrl,
     ...configuredEndpointId ? { endpointId: configuredEndpointId } : {},
     timeoutMs: integerInRange(env.SILMARIL_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS2,
-    blockMalicious: parseBoolean(env.SILMARIL_BLOCK_MALICIOUS) ?? false,
+    ...configuredMode(parseMode(env.SILMARIL_MODE), parseBoolean(env.SILMARIL_BLOCK_MALICIOUS)),
     debug: parseBoolean(env.SILMARIL_DEBUG) ?? false
   };
 }
 function configurationPath(env = process.env) {
-  return nonEmpty(env.SILMARIL_CONFIG_PATH) ?? join(homedir2(), ".cursor", "silmaril-firewall.json");
+  return nonEmpty(env.SILMARIL_CONFIG_PATH) ?? join(homedir(), ".cursor", "silmaril-firewall.json");
 }
 function readFileConfig(path3) {
   let descriptor;
@@ -1103,8 +981,9 @@ function readFileConfig(path3) {
     const endpointIdValue = stringValue(record.endpointId);
     const timeoutMs = typeof record.timeoutMs === "number" ? integerInRange(record.timeoutMs) : void 0;
     const blockMalicious = booleanValue(record.blockMalicious);
+    const mode = parseMode(record.mode);
     const debug = booleanValue(record.debug);
-    if (Object.hasOwn(record, "enabled") && enabled === void 0 || Object.hasOwn(record, "apiKey") && apiKey === void 0 || Object.hasOwn(record, "apiUrl") && apiUrl === void 0 || Object.hasOwn(record, "timeoutMs") && timeoutMs === void 0 || Object.hasOwn(record, "blockMalicious") && blockMalicious === void 0 || Object.hasOwn(record, "debug") && debug === void 0) {
+    if (Object.hasOwn(record, "enabled") && enabled === void 0 || Object.hasOwn(record, "apiKey") && apiKey === void 0 || Object.hasOwn(record, "apiUrl") && apiUrl === void 0 || Object.hasOwn(record, "timeoutMs") && timeoutMs === void 0 || Object.hasOwn(record, "blockMalicious") && blockMalicious === void 0 || Object.hasOwn(record, "mode") && mode === void 0 || Object.hasOwn(record, "debug") && debug === void 0) {
       return { state: "invalid" };
     }
     if (enabled !== void 0) config.enabled = enabled;
@@ -1113,6 +992,7 @@ function readFileConfig(path3) {
     if (endpointIdValue !== void 0) config.endpointId = endpointIdValue;
     if (timeoutMs !== void 0) config.timeoutMs = timeoutMs;
     if (blockMalicious !== void 0) config.blockMalicious = blockMalicious;
+    if (mode !== void 0) config.mode = mode;
     if (debug !== void 0) config.debug = debug;
     return { state: "valid", config };
   } catch (error) {
@@ -1134,6 +1014,19 @@ function parseBoolean(value) {
   if (/^(?:0|false|no|off)$/iu.test(value.trim())) return false;
   return void 0;
 }
+function parseMode(value) {
+  return value === "shadow" || value === "warn" || value === "block" ? value : void 0;
+}
+function configuredMode(mode, legacyBlock) {
+  if (mode) return { mode, blockMalicious: mode === "block" };
+  if (legacyBlock !== void 0) {
+    return {
+      mode: legacyBlock ? "block" : "shadow",
+      blockMalicious: legacyBlock
+    };
+  }
+  return { blockMalicious: false };
+}
 function nonEmpty(value) {
   if (typeof value !== "string") return void 0;
   const trimmed = value.trim();
@@ -1151,10 +1044,10 @@ function booleanValue(value) {
 }
 
 // src/local-evidence.ts
-import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
-import { chmod as chmod2, lstat as lstat2, mkdir as mkdir2, open as open2, rename as rename2, rm as rm2 } from "node:fs/promises";
-import { homedir as homedir3 } from "node:os";
-import path2 from "node:path";
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+import { chmod, lstat, mkdir, open, rename, rm } from "node:fs/promises";
+import { homedir as homedir2 } from "node:os";
+import path from "node:path";
 var MAX_EVENT_BYTES = 16 * 1024;
 var MAX_SAFE_VALUE_LENGTH = 128;
 var DEFAULT_DIRECTORY = ["Library", "Application Support", "Silmaril", "Evidence", "incoming"];
@@ -1175,23 +1068,25 @@ function buildLocalProtectionEvent(input) {
   const riskClass = normalizeCategory(input.classification.primaryOutcome ?? input.classification.primary_outcome);
   const event = {
     schemaVersion: 1,
-    id: stableId("event", input.sessionId, input.requestId, occurredAt, randomUUID3()),
+    id: stableId("event", input.sessionId, input.requestId, occurredAt, randomUUID2()),
     occurredAt,
     host: "cursor",
     hook: input.hook,
     mode: input.mode,
-    requestFingerprint: runtimeRequestFingerprint(input.requestId) ?? fingerprint2("request", input.requestId),
-    sessionFingerprint: fingerprint2("session", input.sessionId),
+    requestFingerprint: runtimeRequestFingerprint(input.requestId) ?? fingerprint("request", input.requestId),
+    sessionFingerprint: fingerprint("session", input.sessionId),
     toolDisplayName: safeToolName(input.toolName),
     riskClass,
     attemptedConsequence: { category: riskClass, summary: CONSEQUENCE_SUMMARIES[riskClass] },
     prediction,
-    modelScore: unitInterval2(input.classification.score),
-    modelThreshold: unitInterval2(input.classification.threshold),
+    modelScore: unitInterval(input.classification.score),
+    modelThreshold: unitInterval(input.classification.threshold),
     policyDecision: input.policyDecision,
     nativeAction: input.nativeAction,
+    warnDelivery: input.warnDelivery,
+    blockUnavailable: input.blockUnavailable,
     outcome: "not_observed",
-    evidenceTruth: input.nativeAction === "block_returned" || input.nativeAction === "content_replaced" ? "native_response_returned" : "plugin_reported",
+    evidenceTruth: input.nativeAction === "block_returned" ? "native_response_returned" : "plugin_reported",
     evidenceCompleteness: "partial",
     provenance: {
       schemaVersion: 1,
@@ -1202,40 +1097,40 @@ function buildLocalProtectionEvent(input) {
       observedAt: occurredAt
     }
   };
-  return omitUndefined2(event);
+  return omitUndefined(event);
 }
 async function writeLocalProtectionEvent(event, env = process.env) {
   const directory = resolveLocalEventDirectory(env);
   const encoded = Buffer.from(`${JSON.stringify(event)}
 `, "utf8");
   if (encoded.byteLength > MAX_EVENT_BYTES) return void 0;
-  const finalPath = path2.join(directory, `event-${sha2562(event.id)}.json`);
-  const temporaryPath = path2.join(directory, `.event-${sha2562(event.id)}.${process.pid}.${randomUUID3()}.tmp`);
+  const finalPath = path.join(directory, `event-${sha256(event.id)}.json`);
+  const temporaryPath = path.join(directory, `.event-${sha256(event.id)}.${process.pid}.${randomUUID2()}.tmp`);
   let handle;
   try {
-    await mkdir2(directory, { recursive: true, mode: 448 });
-    const directoryInfo = await lstat2(directory);
+    await mkdir(directory, { recursive: true, mode: 448 });
+    const directoryInfo = await lstat(directory);
     if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) return void 0;
-    await chmod2(directory, 448);
-    handle = await open2(temporaryPath, "wx", 384);
+    await chmod(directory, 448);
+    handle = await open(temporaryPath, "wx", 384);
     await handle.writeFile(encoded);
     await handle.sync();
     await handle.close();
     handle = void 0;
-    await rename2(temporaryPath, finalPath);
-    await chmod2(finalPath, 384);
+    await rename(temporaryPath, finalPath);
+    await chmod(finalPath, 384);
     return finalPath;
   } catch {
     await handle?.close().catch(() => void 0);
-    await rm2(temporaryPath, { force: true }).catch(() => void 0);
+    await rm(temporaryPath, { force: true }).catch(() => void 0);
     return void 0;
   }
 }
 function resolveLocalEventDirectory(env = process.env) {
   const configured = env.SILMARIL_LOCAL_EVENT_DIR?.trim();
   if (configured) return configured;
-  const configuredHome = env.HOME?.trim() || homedir3();
-  return path2.join(configuredHome, ...DEFAULT_DIRECTORY);
+  const configuredHome = env.HOME?.trim() || homedir2();
+  return path.join(configuredHome, ...DEFAULT_DIRECTORY);
 }
 function normalizePrediction(value) {
   if (value === "MALICIOUS") return "malicious";
@@ -1261,7 +1156,7 @@ function normalizeCategory(value) {
   };
   return mapping[normalized] ?? (normalized ? "other" : "unknown");
 }
-function unitInterval2(value) {
+function unitInterval(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : void 0;
 }
 function safeToolName(value) {
@@ -1270,21 +1165,143 @@ function safeToolName(value) {
   if (!trimmed || /(?:token|secret|password|api[_-]?key)\s*[:=]/iu.test(trimmed)) return void 0;
   return bounded(trimmed.replace(/[^A-Za-z0-9_.:/-]/gu, "_"));
 }
-function fingerprint2(namespace, value) {
-  return typeof value === "string" && value.trim() ? sha2562(`${namespace}:${value}`) : void 0;
+function fingerprint(namespace, value) {
+  return typeof value === "string" && value.trim() ? sha256(`${namespace}:${value}`) : void 0;
 }
 function runtimeRequestFingerprint(value) {
-  return typeof value === "string" && /^silmaril-runtime-check:[0-9a-f-]{36}$/iu.test(value) ? sha2562(value) : void 0;
+  return typeof value === "string" && /^silmaril-runtime-check:[0-9a-f-]{36}$/iu.test(value) ? sha256(value) : void 0;
 }
 function stableId(namespace, ...values) {
-  return `${namespace}-${sha2562(values.filter(Boolean).join("\0"))}`;
+  return `${namespace}-${sha256(values.filter(Boolean).join("\0"))}`;
 }
-function sha2562(value) {
-  return createHash2("sha256").update(value).digest("hex");
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 function bounded(value, maxLength = MAX_SAFE_VALUE_LENGTH) {
   const trimmed = value.trim();
   return trimmed ? trimmed.slice(0, maxLength) : void 0;
+}
+function omitUndefined(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== void 0));
+}
+
+// src/decision-cache.ts
+import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
+import { chmod as chmod2, lstat as lstat2, mkdir as mkdir2, open as open2, readFile, readdir, rename as rename2, rm as rm2 } from "node:fs/promises";
+import { homedir as homedir3 } from "node:os";
+import path2 from "node:path";
+var CACHE_VERSION = 1;
+var DEFAULT_TTL_MS = 10 * 60 * 1e3;
+var MAX_CACHE_BYTES = 4 * 1024;
+var MAX_CACHE_FILES_SCANNED = 128;
+async function writeOutputDecision(conversationId, generationId, classification, options = {}) {
+  const directory = options.directory ?? defaultCacheDirectory();
+  const decision = omitUndefined2({
+    version: CACHE_VERSION,
+    createdAt: (options.now ?? /* @__PURE__ */ new Date()).toISOString(),
+    conversationFingerprint: fingerprint2("conversation", conversationId),
+    generationFingerprint: fingerprint2("generation", generationId),
+    prediction: "MALICIOUS",
+    score: unitInterval2(classification.score),
+    threshold: unitInterval2(classification.threshold),
+    primaryOutcome: boundedOutcome(classification.primaryOutcome ?? classification.primary_outcome)
+  });
+  const body = Buffer.from(`${JSON.stringify(decision)}
+`, "utf8");
+  if (body.byteLength > MAX_CACHE_BYTES) return false;
+  const destination = path2.join(directory, cacheFileName(conversationId, generationId));
+  const temporary = path2.join(directory, `.${path2.basename(destination)}.${process.pid}.${randomUUID3()}.tmp`);
+  let handle;
+  try {
+    await mkdir2(directory, { recursive: true, mode: 448 });
+    const directoryInfo = await lstat2(directory);
+    if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) return false;
+    await chmod2(directory, 448);
+    await cleanupExpiredOutputDecisions(directory, options.now ?? /* @__PURE__ */ new Date());
+    handle = await open2(temporary, "wx", 384);
+    await handle.writeFile(body);
+    await handle.sync();
+    await handle.close();
+    handle = void 0;
+    await rename2(temporary, destination);
+    await chmod2(destination, 384);
+    return true;
+  } catch {
+    await handle?.close().catch(() => void 0);
+    await rm2(temporary, { force: true }).catch(() => void 0);
+    return false;
+  }
+}
+async function consumeOutputDecision(conversationId, generationId, options = {}) {
+  const destination = path2.join(options.directory ?? defaultCacheDirectory(), cacheFileName(conversationId, generationId));
+  try {
+    const encoded = await readFile(destination);
+    await rm2(destination, { force: true });
+    if (encoded.byteLength > MAX_CACHE_BYTES) return void 0;
+    const value = JSON.parse(encoded.toString("utf8"));
+    if (!isCachedDecision(value)) return void 0;
+    const age = (options.now ?? /* @__PURE__ */ new Date()).getTime() - Date.parse(value.createdAt);
+    const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
+    if (!Number.isFinite(age) || age < 0 || age > ttlMs) return void 0;
+    if (value.conversationFingerprint !== fingerprint2("conversation", conversationId)) return void 0;
+    if (value.generationFingerprint !== fingerprint2("generation", generationId)) return void 0;
+    return value;
+  } catch {
+    await rm2(destination, { force: true }).catch(() => void 0);
+    return void 0;
+  }
+}
+function defaultCacheDirectory(homeDirectory = homedir3()) {
+  return path2.join(homeDirectory, "Library", "Application Support", "Silmaril", "Cache", "CursorFirewall");
+}
+async function cleanupExpiredOutputDecisions(directory, now) {
+  let entries;
+  try {
+    entries = await readdir(directory);
+  } catch {
+    return;
+  }
+  for (const entry of entries.filter((name) => /^decision-[a-f0-9]{64}\.json$/u.test(name)).slice(0, MAX_CACHE_FILES_SCANNED)) {
+    const candidate = path2.join(directory, entry);
+    try {
+      const encoded = await readFile(candidate);
+      if (encoded.byteLength > MAX_CACHE_BYTES) {
+        await rm2(candidate, { force: true });
+        continue;
+      }
+      const value = JSON.parse(encoded.toString("utf8"));
+      if (!isCachedDecision(value)) {
+        await rm2(candidate, { force: true });
+        continue;
+      }
+      const age = now.getTime() - Date.parse(value.createdAt);
+      if (!Number.isFinite(age) || age < 0 || age > DEFAULT_TTL_MS) await rm2(candidate, { force: true });
+    } catch {
+      await rm2(candidate, { force: true }).catch(() => void 0);
+    }
+  }
+}
+function cacheFileName(conversationId, generationId) {
+  return `decision-${sha2562(`${conversationId}\0${generationId}`)}.json`;
+}
+function isCachedDecision(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value;
+  return record.version === 1 && record.prediction === "MALICIOUS" && typeof record.createdAt === "string" && typeof record.conversationFingerprint === "string" && typeof record.generationFingerprint === "string";
+}
+function boundedOutcome(value) {
+  if (typeof value !== "string") return void 0;
+  const normalized = value.trim().replace(/[^A-Za-z0-9_.-]/gu, "_");
+  return normalized ? normalized.slice(0, 128) : void 0;
+}
+function unitInterval2(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : void 0;
+}
+function fingerprint2(namespace, value) {
+  return sha2562(`${namespace}:${value}`);
+}
+function sha2562(value) {
+  return createHash2("sha256").update(value).digest("hex");
 }
 function omitUndefined2(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== void 0));
@@ -1292,17 +1309,14 @@ function omitUndefined2(value) {
 
 // src/cursor-hook.ts
 var PLUGIN_NAME = "cursor-firewall-plugin";
-var PLUGIN_VERSION = "0.1.4";
+var PLUGIN_VERSION = "0.2.0";
 var MAX_STDIN_BYTES = 4 * 1024 * 1024;
 var MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 var MAX_TRANSCRIPT_SEGMENTS = 256;
 var SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
-var SAFE_FOLLOWUP_MESSAGE = "Silmaril Firewall blocked the previous output. Continue without using or reproducing the flagged content.";
 var DEFAULT_DEPENDENCIES = {
   firewallConstructor: Firewall,
-  evidenceEmitter: writeLocalProtectionEvent,
-  decisionWriter: writeOutputDecision,
-  decisionConsumer: consumeOutputDecision
+  evidenceEmitter: writeLocalProtectionEvent
 };
 async function runCursorHook(input, env = process.env, dependencies = {}) {
   const config = resolveRuntimeConfig(env);
@@ -1315,7 +1329,7 @@ async function runCursorHook(input, env = process.env, dependencies = {}) {
   const hookEventName = readString(record?.hook_event_name);
   if (!record || !hookEventName) return void 0;
   if (hookEventName === "stop") {
-    return handleStop(record, config, env, deps);
+    return void 0;
   }
   const targets = buildCursorTargets(record);
   if (targets.length === 0) {
@@ -1327,7 +1341,8 @@ async function runCursorHook(input, env = process.env, dependencies = {}) {
     const firewall = new deps.firewallConstructor({
       apiKey: config.apiKey,
       apiUrl: config.apiUrl,
-      timeoutMs: config.timeoutMs
+      timeoutMs: config.timeoutMs,
+      ...config.mode ? { mode: config.mode } : {}
     });
     classified = await classifyTargets(firewall, targets, config.endpointId);
   } catch (error) {
@@ -1380,14 +1395,12 @@ function buildCursorTargets(input) {
     case "beforeReadFile":
       return makeTarget(readString(input.content), HookLabel.TOOL_RESPONSE, "tool_result", "deny", "0", "Read");
     case "postToolUse": {
-      const toolName = readString(input.tool_name);
-      const capability = toolName?.startsWith("MCP:") ? "replace_mcp" : "none";
-      return makeTarget(readTextOrSerialized(input.tool_output), HookLabel.TOOL_RESPONSE, "post_tool", capability);
+      return makeTarget(readTextOrSerialized(input.tool_output), HookLabel.TOOL_RESPONSE, "post_tool", "none");
     }
     case "postToolUseFailure":
       return makeTarget(readString(input.error_message), HookLabel.TOOL_RESPONSE, "post_tool", "none");
     case "afterAgentResponse":
-      return makeTarget(readString(input.text), HookLabel.LLM_OUTPUT, "llm_output", "followup");
+      return makeTarget(readString(input.text), HookLabel.LLM_OUTPUT, "llm_output", "none");
     case "afterAgentThought":
       return makeTarget(readString(input.text), HookLabel.LLM_OUTPUT, "llm_output", "none", "0", void 0, void 0, { source: "reasoning" });
     case "subagentStart":
@@ -1407,38 +1420,10 @@ async function classifyTargets(firewall, targets, endpointId2) {
 async function handleAgentResponse(entry, config, env, deps) {
   if (!entry) return void 0;
   const { target, result } = entry;
-  const shouldCache = config.blockMalicious && isMalicious(result) && target.sessionId && target.generationId;
-  let cached = false;
-  if (shouldCache && target.sessionId && target.generationId) {
-    cached = await deps.decisionWriter(target.sessionId, target.generationId, result);
-  }
+  const cached = false;
   await emitEvidence(target, result, config, false, env, deps.evidenceEmitter);
   debugClassification(env, target, result, false, { decisionCached: cached });
   return void 0;
-}
-async function handleStop(input, config, env, deps) {
-  if (!config.blockMalicious) return void 0;
-  const conversationId = readString(input.conversation_id);
-  const generationId = readString(input.generation_id);
-  if (!conversationId || !generationId) return void 0;
-  const decision = await deps.decisionConsumer(conversationId, generationId);
-  if (!decision) return void 0;
-  const enforceable = input.status === "completed" && readFiniteNumber(input.loop_count) === 0;
-  const target = {
-    hookEventName: "stop",
-    text: "",
-    firewallHook: HookLabel.LLM_OUTPUT,
-    evidenceHook: "llm_output",
-    requestId: logicalRequestId(input, "cached-output"),
-    sessionId: conversationId,
-    generationId,
-    metadata: buildMetadata(input, { source: "cached_output_decision" }),
-    nativeCapability: "followup"
-  };
-  const result = cachedDecisionResult(decision);
-  await emitEvidence(target, result, config, enforceable, env, deps.evidenceEmitter);
-  debugClassification(env, target, result, enforceable, { decisionCacheConsumed: true });
-  return enforceable ? { followup_message: SAFE_FOLLOWUP_MESSAGE } : void 0;
 }
 function buildBlockOutput(target, input) {
   switch (target.hookEventName) {
@@ -1449,37 +1434,34 @@ function buildBlockOutput(target, input) {
     case "beforeReadFile":
       return { permission: "deny", user_message: SAFE_BLOCK_MESSAGE };
     case "postToolUse":
-      return target.nativeCapability === "replace_mcp" ? { updated_mcp_tool_output: { error: SAFE_BLOCK_MESSAGE }, additional_context: SAFE_BLOCK_MESSAGE } : void 0;
+      return void 0;
     case "subagentStart":
       return { permission: "deny", user_message: SAFE_BLOCK_MESSAGE };
-    case "subagentStop":
-      return input.status === "completed" && readFiniteNumber(input.loop_count) === 0 ? { followup_message: SAFE_FOLLOWUP_MESSAGE } : void 0;
     default:
       return void 0;
   }
 }
-function shouldNativeBlock(target, result, config, input) {
-  if (!config.blockMalicious || !isMalicious(result) || target.nativeCapability === "none") return false;
-  if (target.nativeCapability === "followup") {
-    return input.status === "completed" && readFiniteNumber(input.loop_count) === 0;
-  }
-  return true;
+function shouldNativeBlock(target, result, config, _input) {
+  return effectiveMode(result, config.mode) === "block" && isMalicious(result) && target.nativeCapability === "deny";
 }
 async function emitEvidence(target, result, config, nativeBlocked, env, emitter) {
   const malicious = isMalicious(result);
+  const mode = effectiveMode(result, config.mode);
   const policyDecision = nativeBlocked ? "block" : malicious ? "monitor" : "allow";
-  const nativeAction = nativeBlocked ? target.nativeCapability === "replace_mcp" ? "content_replaced" : "block_returned" : "allowed";
+  const nativeAction = nativeBlocked ? "block_returned" : "allowed";
   const event = buildLocalProtectionEvent({
     pluginName: PLUGIN_NAME,
     pluginVersion: PLUGIN_VERSION,
     hook: target.evidenceHook,
-    mode: config.blockMalicious ? "block" : "shadow",
+    mode,
     requestId: target.requestId,
     ...target.sessionId ? { sessionId: target.sessionId } : {},
     ...target.toolName ? { toolName: target.toolName } : {},
     classification: result,
     policyDecision,
-    nativeAction
+    nativeAction,
+    ...malicious && mode === "warn" ? { warnDelivery: "unsupported" } : {},
+    ...malicious && mode === "block" && !nativeBlocked ? { blockUnavailable: true } : {}
   });
   await Promise.resolve(emitter(event, env)).catch(() => void 0);
 }
@@ -1503,7 +1485,7 @@ function buildSubagentTargets(input) {
     ...readString(input.generation_id) ? { generationId: readString(input.generation_id) } : {},
     ...segment.toolName ? { toolName: segment.toolName } : {},
     metadata: buildMetadata(input, { source: segment.source, transcriptSegmentIndex: index }),
-    nativeCapability: "followup"
+    nativeCapability: "none"
   }));
 }
 function readCursorTranscriptSegments(transcriptPath) {
@@ -1616,13 +1598,10 @@ function logicalRequestId(input, suffix) {
     suffix
   ].join("\0"))}`;
 }
-function cachedDecisionResult(decision) {
-  return omitUndefined3({
-    prediction: decision.prediction,
-    score: decision.score,
-    threshold: decision.threshold,
-    primaryOutcome: decision.primaryOutcome
-  });
+function effectiveMode(result, requestedMode) {
+  const returned = result.mode;
+  if (requestedMode) return requestedMode;
+  return returned === "shadow" || returned === "warn" || returned === "block" ? returned : "shadow";
 }
 function isMalicious(result) {
   return result.prediction === "MALICIOUS";
@@ -1657,9 +1636,6 @@ function readRecord(value) {
 }
 function readString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : void 0;
-}
-function readFiniteNumber(value) {
-  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
 }
 function omitUndefined3(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== void 0));
@@ -1722,6 +1698,7 @@ export {
   buildLocalProtectionEvent,
   configurationPath,
   consumeOutputDecision,
+  effectiveMode,
   readCursorTranscriptSegments,
   resolveLocalEventDirectory,
   resolveRuntimeConfig,
