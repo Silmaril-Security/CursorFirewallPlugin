@@ -1600,9 +1600,8 @@ function logicalRequestId(input, suffix) {
 }
 function effectiveMode(result, requestedMode) {
   const returned = result.mode;
-  if (requestedMode === "block" || returned === "block") return "block";
   if (requestedMode) return requestedMode;
-  return returned === "shadow" || returned === "warn" ? returned : "shadow";
+  return returned === "shadow" || returned === "warn" || returned === "block" ? returned : "shadow";
 }
 function isMalicious(result) {
   return result.prediction === "MALICIOUS";
