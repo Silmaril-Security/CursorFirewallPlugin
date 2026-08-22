@@ -71,9 +71,10 @@ function captureDependencies(results, events = [], calls = []) {
   };
 }
 
-test("backend effective mode wins and configured mode is a legacy fallback", () => {
-  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "warn" }, "block"), "warn");
+test("configured pilot override wins and backend mode controls otherwise", () => {
+  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "warn" }, "block"), "block");
   assert.equal(effectiveMode({ prediction: "MALICIOUS" }, "block"), "block");
+  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "warn" }), "warn");
   assert.equal(effectiveMode({ prediction: "MALICIOUS" }), "shadow");
 });
 
@@ -290,6 +291,8 @@ test("postToolUse never replaces content and records unavailable block", async (
 });
 
 test("warn mode remains unchanged where Cursor cannot deliver same-turn context", async () => {
+  const env = { ...BASE_ENV };
+  delete env.SILMARIL_BLOCK_MALICIOUS;
   const events = [];
   for (const input of [
     hookInput("beforeSubmitPrompt", { prompt: "raw prompt" }),
@@ -297,7 +300,7 @@ test("warn mode remains unchanged where Cursor cannot deliver same-turn context"
     hookInput("postToolUse", { tool_name: "Shell", tool_output: "raw output" }),
   ]) {
     assert.equal(
-      await runCursorHook(input, BASE_ENV, captureDependencies([{ prediction: "MALICIOUS", mode: "warn" }], events)),
+      await runCursorHook(input, env, captureDependencies([{ prediction: "MALICIOUS", mode: "warn" }], events)),
       undefined,
     );
   }

@@ -1598,9 +1598,10 @@ function logicalRequestId(input, suffix) {
     suffix
   ].join("\0"))}`;
 }
-function effectiveMode(result, fallbackMode) {
+function effectiveMode(result, requestedMode) {
+  if (requestedMode) return requestedMode;
   const returned = result.mode;
-  return returned === "shadow" || returned === "warn" || returned === "block" ? returned : fallbackMode ?? "shadow";
+  return returned === "shadow" || returned === "warn" || returned === "block" ? returned : "shadow";
 }
 function isMalicious(result) {
   return result.prediction === "MALICIOUS";
