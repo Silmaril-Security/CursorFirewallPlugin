@@ -406,12 +406,14 @@ function logicalRequestId(input: HookRecord, suffix: string): string {
 
 export function effectiveMode(
   result: ClassificationResult,
-  requestedMode?: FirewallMode,
+  fallbackMode?: FirewallMode,
 ): FirewallMode {
+  // The backend response is the effective policy decision. The locally
+  // requested mode is only a compatibility fallback for older SDK responses.
   const returned = result.mode;
   return returned === "shadow" || returned === "warn" || returned === "block"
     ? returned
-    : requestedMode ?? "shadow";
+    : fallbackMode ?? "shadow";
 }
 
 function isMalicious(result: ClassificationResult): boolean {

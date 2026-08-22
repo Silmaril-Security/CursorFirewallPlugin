@@ -10,6 +10,7 @@ import {
   buildCursorTargets,
   buildLocalProtectionEvent,
   consumeOutputDecision,
+  effectiveMode,
   readCursorTranscriptSegments,
   resolveRuntimeConfig,
   runCursorHook,
@@ -69,6 +70,12 @@ function captureDependencies(results, events = [], calls = []) {
     evidenceEmitter: async (event) => { events.push(event); },
   };
 }
+
+test("backend effective mode wins and configured mode is a legacy fallback", () => {
+  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "warn" }, "block"), "warn");
+  assert.equal(effectiveMode({ prediction: "MALICIOUS" }, "block"), "block");
+  assert.equal(effectiveMode({ prediction: "MALICIOUS" }), "shadow");
+});
 
 test("runtime config defaults and rejects incomplete configuration", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-missing-config-"));
