@@ -2,11 +2,11 @@ import { Firewall, HookLabel, type FirewallOptions } from "@silmaril-security/sd
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { consumeOutputDecision, writeOutputDecision, type CachedOutputDecision } from "./decision-cache.js";
 import {
   resolveRuntimeConfig,
   type RuntimeConfig,
   type RuntimeEnv,
+  type FirewallMode,
 } from "./runtime-config.js";
 import {
   buildLocalProtectionEvent,
@@ -21,19 +21,18 @@ export { buildLocalProtectionEvent, resolveLocalEventDirectory, writeLocalProtec
 export { configurationPath, resolveRuntimeConfig } from "./runtime-config.js";
 
 export const PLUGIN_NAME = "cursor-firewall-plugin";
-export const PLUGIN_VERSION = "0.1.4";
+export const PLUGIN_VERSION = "0.2.0";
 const MAX_STDIN_BYTES = 4 * 1024 * 1024;
 const MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 const MAX_TRANSCRIPT_SEGMENTS = 256;
 const SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
-const SAFE_FOLLOWUP_MESSAGE = "Silmaril Firewall blocked the previous output. Continue without using or reproducing the flagged content.";
 
 type ClassificationResult = Record<string, unknown>;
-type ClassifyOptions = { hook?: string; toolName?: string; metadata?: Record<string, unknown>; requestId?: string };
+type ClassifyOptions = { hook?: string; toolName?: string; metadata?: Record<string, unknown>; requestId?: string; mode?: FirewallMode };
 type FirewallClient = {
   classify(text: string, options?: ClassifyOptions): Promise<ClassificationResult>;
 };
-type FirewallConstructor = new (options: FirewallOptions) => FirewallClient;
+type FirewallConstructor = new (options: FirewallOptions & { mode?: FirewallMode }) => FirewallClient;
 type HookRecord = Record<string, unknown>;
 type HookOutput = Record<string, unknown>;
 
@@ -48,21 +47,17 @@ type Target = {
   toolName?: string;
   toolUseId?: string;
   metadata: Record<string, unknown>;
-  nativeCapability: "none" | "deny" | "replace_mcp" | "followup";
+  nativeCapability: "none" | "deny";
 };
 
 type RuntimeDependencies = {
   firewallConstructor: FirewallConstructor;
   evidenceEmitter: (event: LocalProtectionEventV1, env: RuntimeEnv) => Promise<unknown>;
-  decisionWriter: typeof writeOutputDecision;
-  decisionConsumer: typeof consumeOutputDecision;
 };
 
 const DEFAULT_DEPENDENCIES: RuntimeDependencies = {
   firewallConstructor: Firewall as unknown as FirewallConstructor,
   evidenceEmitter: writeLocalProtectionEvent,
-  decisionWriter: writeOutputDecision,
-  decisionConsumer: consumeOutputDecision,
 };
 
 export async function runCursorHook(
@@ -81,7 +76,7 @@ export async function runCursorHook(
   if (!record || !hookEventName) return undefined;
 
   if (hookEventName === "stop") {
-    return handleStop(record, config, env, deps);
+    return undefined;
   }
 
   const targets = buildCursorTargets(record);
@@ -96,6 +91,7 @@ export async function runCursorHook(
       apiKey: config.apiKey,
       apiUrl: config.apiUrl,
       timeoutMs: config.timeoutMs,
+      ...(config.mode ? { mode: config.mode } : {}),
     });
     classified = await classifyTargets(firewall, targets, config.endpointId);
   } catch (error) {
@@ -162,14 +158,12 @@ export function buildCursorTargets(input: HookRecord): Target[] {
     case "beforeReadFile":
       return makeTarget(readString(input.content), HookLabel.TOOL_RESPONSE, "tool_result", "deny", "0", "Read");
     case "postToolUse": {
-      const toolName = readString(input.tool_name);
-      const capability = toolName?.startsWith("MCP:") ? "replace_mcp" : "none";
-      return makeTarget(readTextOrSerialized(input.tool_output), HookLabel.TOOL_RESPONSE, "post_tool", capability);
+      return makeTarget(readTextOrSerialized(input.tool_output), HookLabel.TOOL_RESPONSE, "post_tool", "none");
     }
     case "postToolUseFailure":
       return makeTarget(readString(input.error_message), HookLabel.TOOL_RESPONSE, "post_tool", "none");
     case "afterAgentResponse":
-      return makeTarget(readString(input.text), HookLabel.LLM_OUTPUT, "llm_output", "followup");
+      return makeTarget(readString(input.text), HookLabel.LLM_OUTPUT, "llm_output", "none");
     case "afterAgentThought":
       return makeTarget(readString(input.text), HookLabel.LLM_OUTPUT, "llm_output", "none", "0", undefined, undefined, { source: "reasoning" });
     case "subagentStart":
@@ -200,45 +194,10 @@ async function handleAgentResponse(
 ): Promise<undefined> {
   if (!entry) return undefined;
   const { target, result } = entry;
-  const shouldCache = config.blockMalicious && isMalicious(result) && target.sessionId && target.generationId;
-  let cached = false;
-  if (shouldCache && target.sessionId && target.generationId) {
-    cached = await deps.decisionWriter(target.sessionId, target.generationId, result);
-  }
+  const cached = false;
   await emitEvidence(target, result, config, false, env, deps.evidenceEmitter);
   debugClassification(env, target, result, false, { decisionCached: cached });
   return undefined;
-}
-
-async function handleStop(
-  input: HookRecord,
-  config: RuntimeConfig,
-  env: RuntimeEnv,
-  deps: RuntimeDependencies,
-): Promise<HookOutput | undefined> {
-  if (!config.blockMalicious) return undefined;
-  const conversationId = readString(input.conversation_id);
-  const generationId = readString(input.generation_id);
-  if (!conversationId || !generationId) return undefined;
-  const decision = await deps.decisionConsumer(conversationId, generationId);
-  if (!decision) return undefined;
-
-  const enforceable = input.status === "completed" && readFiniteNumber(input.loop_count) === 0;
-  const target: Target = {
-    hookEventName: "stop",
-    text: "",
-    firewallHook: HookLabel.LLM_OUTPUT,
-    evidenceHook: "llm_output",
-    requestId: logicalRequestId(input, "cached-output"),
-    sessionId: conversationId,
-    generationId,
-    metadata: buildMetadata(input, { source: "cached_output_decision" }),
-    nativeCapability: "followup",
-  };
-  const result = cachedDecisionResult(decision);
-  await emitEvidence(target, result, config, enforceable, env, deps.evidenceEmitter);
-  debugClassification(env, target, result, enforceable, { decisionCacheConsumed: true });
-  return enforceable ? { followup_message: SAFE_FOLLOWUP_MESSAGE } : undefined;
 }
 
 function buildBlockOutput(target: Target, input: HookRecord): HookOutput | undefined {
@@ -250,26 +209,18 @@ function buildBlockOutput(target: Target, input: HookRecord): HookOutput | undef
     case "beforeReadFile":
       return { permission: "deny", user_message: SAFE_BLOCK_MESSAGE };
     case "postToolUse":
-      return target.nativeCapability === "replace_mcp"
-        ? { updated_mcp_tool_output: { error: SAFE_BLOCK_MESSAGE }, additional_context: SAFE_BLOCK_MESSAGE }
-        : undefined;
+      return undefined;
     case "subagentStart":
       return { permission: "deny", user_message: SAFE_BLOCK_MESSAGE };
-    case "subagentStop":
-      return input.status === "completed" && readFiniteNumber(input.loop_count) === 0
-        ? { followup_message: SAFE_FOLLOWUP_MESSAGE }
-        : undefined;
     default:
       return undefined;
   }
 }
 
-function shouldNativeBlock(target: Target, result: ClassificationResult, config: RuntimeConfig, input: HookRecord): boolean {
-  if (!config.blockMalicious || !isMalicious(result) || target.nativeCapability === "none") return false;
-  if (target.nativeCapability === "followup") {
-    return input.status === "completed" && readFiniteNumber(input.loop_count) === 0;
-  }
-  return true;
+function shouldNativeBlock(target: Target, result: ClassificationResult, config: RuntimeConfig, _input: HookRecord): boolean {
+  return effectiveMode(result, config.mode) === "block"
+    && isMalicious(result)
+    && target.nativeCapability === "deny";
 }
 
 async function emitEvidence(
@@ -281,25 +232,28 @@ async function emitEvidence(
   emitter: RuntimeDependencies["evidenceEmitter"],
 ): Promise<void> {
   const malicious = isMalicious(result);
+  const mode = effectiveMode(result, config.mode);
   const policyDecision: LocalEvidenceInput["policyDecision"] = nativeBlocked
     ? "block"
     : malicious
       ? "monitor"
       : "allow";
   const nativeAction: LocalEvidenceInput["nativeAction"] = nativeBlocked
-    ? target.nativeCapability === "replace_mcp" ? "content_replaced" : "block_returned"
+    ? "block_returned"
     : "allowed";
   const event = buildLocalProtectionEvent({
     pluginName: PLUGIN_NAME,
     pluginVersion: PLUGIN_VERSION,
     hook: target.evidenceHook,
-    mode: config.blockMalicious ? "block" : "shadow",
+    mode,
     requestId: target.requestId,
     ...(target.sessionId ? { sessionId: target.sessionId } : {}),
     ...(target.toolName ? { toolName: target.toolName } : {}),
     classification: result,
     policyDecision,
     nativeAction,
+    ...(malicious && mode === "warn" ? { warnDelivery: "unsupported" } : {}),
+    ...(malicious && mode === "block" && !nativeBlocked ? { blockUnavailable: true } : {}),
   });
   await Promise.resolve(emitter(event, env)).catch(() => undefined);
 }
@@ -324,7 +278,7 @@ function buildSubagentTargets(input: HookRecord): Target[] {
     ...(readString(input.generation_id) ? { generationId: readString(input.generation_id) as string } : {}),
     ...(segment.toolName ? { toolName: segment.toolName } : {}),
     metadata: buildMetadata(input, { source: segment.source, transcriptSegmentIndex: index }),
-    nativeCapability: "followup",
+    nativeCapability: "none",
   }));
 }
 
@@ -450,13 +404,14 @@ function logicalRequestId(input: HookRecord, suffix: string): string {
   ].join("\u0000"))}`;
 }
 
-function cachedDecisionResult(decision: CachedOutputDecision): ClassificationResult {
-  return omitUndefined({
-    prediction: decision.prediction,
-    score: decision.score,
-    threshold: decision.threshold,
-    primaryOutcome: decision.primaryOutcome,
-  });
+export function effectiveMode(
+  result: ClassificationResult,
+  requestedMode?: FirewallMode,
+): FirewallMode {
+  const returned = result.mode;
+  return returned === "shadow" || returned === "warn" || returned === "block"
+    ? returned
+    : requestedMode ?? "shadow";
 }
 
 function isMalicious(result: ClassificationResult): boolean {

@@ -2,7 +2,7 @@
 
 Silmaril Firewall lifecycle protection for Cursor agents and subagents.
 
-The plugin classifies host-visible prompts, tool calls, tool results, file reads, assistant output, reasoning blocks, and subagent activity with `@silmaril-security/sdk`. Shadow mode is the default and never changes Cursor behavior. Block mode acts only on the exact SDK prediction `MALICIOUS` and only where Cursor exposes a native enforcement response.
+The plugin classifies host-visible prompts, tool calls, tool results, file reads, assistant output, reasoning blocks, and subagent activity with `@silmaril-security/sdk`. Shadow is silent, Warn adds bounded context only where Cursor supports it, and Block acts only on the exact SDK prediction `MALICIOUS` at genuine native enforcement boundaries. Unsupported post-block boundaries remain unchanged and record `block_unavailable`.
 
 ## Install
 
@@ -32,12 +32,12 @@ The macOS app writes a private configuration file at `~/.cursor/silmaril-firewal
   "apiKey": "...",
   "endpointId": "2b64e603-f82a-4aec-9524-9736472dc80a",
   "timeoutMs": 2500,
-  "blockMalicious": false,
+  "mode": "warn",
   "debug": false
 }
 ```
 
-The file must be a regular file owned by the current user with no group or world permissions. Symbolic links, files larger than 64 KiB, malformed JSON, invalid recognized fields, and insecure permissions are rejected without falling back to ambient credentials. `SILMARIL_CONFIG_PATH` can select a different private file.
+The file must be a regular file owned by the current user with no group or world permissions. Omit `mode` to use the backend, or set `shadow`, `warn`, or `block`; explicit mode wins over legacy booleans. Symbolic links, files larger than 64 KiB, malformed JSON, invalid recognized fields, and insecure permissions are rejected without falling back to ambient credentials. `SILMARIL_CONFIG_PATH` can select a different private file.
 
 Environment variables remain supported as a fallback when the private file is missing. When the private file exists, it is authoritative for enabled state, credentials, timeout, and mode so ambient shell variables cannot silently replace app-managed protection. `SILMARIL_DEBUG` remains an explicit diagnostic override.
 
@@ -64,13 +64,13 @@ Set `SILMARIL_LOCAL_EVENT_DIR` only when the default private evidence spool must
 | `beforeSubmitPrompt` | `user_input` | Observe | Prevent prompt submission |
 | `preToolUse` | `tool_call` | Observe | Deny tool execution |
 | `beforeReadFile` | `tool_response` | Observe | Deny content before model consumption |
-| `postToolUse` | `tool_response` | Observe | Replace MCP results; other completed tools are observational |
+| `postToolUse` | `tool_response` | Observe | Preserve completed result and record `block_unavailable` |
 | `postToolUseFailure` | `tool_response` | Observe | None |
-| `afterAgentResponse` | `llm_output` | Observe | Cache a bounded decision for `stop` |
-| `stop` | `llm_output` | Consume cached decision | Submit one safe follow-up |
+| `afterAgentResponse` | `llm_output` | Observe | Preserve completed response and record `block_unavailable` |
+| `stop` | `llm_output` | No classification | No mutation |
 | `afterAgentThought` | `llm_output` | Observe | None |
 | `subagentStart` | `user_input` | Observe | Deny spawn |
-| `subagentStop` | segment-native labels | Observe bounded transcript | Submit one safe follow-up |
+| `subagentStop` | segment-native labels | Observe bounded transcript | Preserve completed output and record `block_unavailable` |
 
 The generic `preToolUse` hook covers Shell, Read, Write, Delete, Task, and MCP tools. The separate `beforeReadFile` hook is retained because it exposes file contents before they reach the model.
 
@@ -80,9 +80,9 @@ Cursor Tab/inline-completion hooks are not included. Local plugin installation d
 
 ## Enforcement semantics
 
-Shadow mode returns no hook output. Block mode is enabled only with `SILMARIL_BLOCK_MALICIOUS=true`. A result blocks only when `prediction === "MALICIOUS"`; casing variants and unknown values never block.
+Shadow mode returns no hook output. Omit mode to use the backend, set `SILMARIL_MODE=block` for a pilot override, or use the legacy block boolean. A result blocks only when `prediction === "MALICIOUS"`; casing variants and unknown values never block.
 
-Post-execution hooks cannot undo tool side effects. Cursor can replace a post-tool result only for MCP tools. Assistant-output blocking uses a private, ten-minute, single-use metadata cache keyed by hashed conversation and generation identifiers. The cache contains no assistant text.
+Post-execution hooks cannot undo tool side effects, so completed tool, assistant, and subagent output is preserved. These boundaries record `block_unavailable` instead of returning replacement content or a follow-up response.
 
 ## Local evidence
 

@@ -8,11 +8,13 @@ const MAX_TIMEOUT_MS = 10_000;
 const MAX_CONFIG_BYTES = 64 * 1024;
 
 export type RuntimeEnv = Record<string, string | undefined>;
+export type FirewallMode = "shadow" | "warn" | "block";
 export type RuntimeConfig = {
   apiKey: string;
   apiUrl: string;
   endpointId?: string;
   timeoutMs: number;
+  mode?: FirewallMode;
   blockMalicious: boolean;
   debug: boolean;
 };
@@ -23,6 +25,7 @@ type FileConfig = {
   apiUrl?: string;
   endpointId?: string;
   timeoutMs?: number;
+  mode?: FirewallMode;
   blockMalicious?: boolean;
   debug?: boolean;
 };
@@ -48,7 +51,7 @@ export function resolveRuntimeConfig(env: RuntimeEnv = process.env): RuntimeConf
       apiUrl,
       ...(configuredEndpointId ? { endpointId: configuredEndpointId } : {}),
       timeoutMs: file.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      blockMalicious: file.blockMalicious ?? false,
+      ...configuredMode(file.mode, file.blockMalicious),
       debug: parseBoolean(env.SILMARIL_DEBUG) ?? file.debug ?? false,
     };
   }
@@ -66,7 +69,7 @@ export function resolveRuntimeConfig(env: RuntimeEnv = process.env): RuntimeConf
     apiUrl,
     ...(configuredEndpointId ? { endpointId: configuredEndpointId } : {}),
     timeoutMs: integerInRange(env.SILMARIL_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS,
-    blockMalicious: parseBoolean(env.SILMARIL_BLOCK_MALICIOUS) ?? false,
+    ...configuredMode(parseMode(env.SILMARIL_MODE), parseBoolean(env.SILMARIL_BLOCK_MALICIOUS)),
     debug: parseBoolean(env.SILMARIL_DEBUG) ?? false,
   };
 }
@@ -101,6 +104,7 @@ function readFileConfig(path: string): FileConfigResult {
       ? integerInRange(record.timeoutMs)
       : undefined;
     const blockMalicious = booleanValue(record.blockMalicious);
+    const mode = parseMode(record.mode);
     const debug = booleanValue(record.debug);
     if (
       (Object.hasOwn(record, "enabled") && enabled === undefined)
@@ -108,6 +112,7 @@ function readFileConfig(path: string): FileConfigResult {
       || (Object.hasOwn(record, "apiUrl") && apiUrl === undefined)
       || (Object.hasOwn(record, "timeoutMs") && timeoutMs === undefined)
       || (Object.hasOwn(record, "blockMalicious") && blockMalicious === undefined)
+      || (Object.hasOwn(record, "mode") && mode === undefined)
       || (Object.hasOwn(record, "debug") && debug === undefined)
     ) {
       return { state: "invalid" };
@@ -118,6 +123,7 @@ function readFileConfig(path: string): FileConfigResult {
     if (endpointIdValue !== undefined) config.endpointId = endpointIdValue;
     if (timeoutMs !== undefined) config.timeoutMs = timeoutMs;
     if (blockMalicious !== undefined) config.blockMalicious = blockMalicious;
+    if (mode !== undefined) config.mode = mode;
     if (debug !== undefined) config.debug = debug;
     return { state: "valid", config };
   } catch (error) {
@@ -151,6 +157,24 @@ function parseBoolean(value: unknown): boolean | undefined {
   if (/^(?:1|true|yes|on)$/iu.test(value.trim())) return true;
   if (/^(?:0|false|no|off)$/iu.test(value.trim())) return false;
   return undefined;
+}
+
+function parseMode(value: unknown): FirewallMode | undefined {
+  return value === "shadow" || value === "warn" || value === "block" ? value : undefined;
+}
+
+function configuredMode(
+  mode: FirewallMode | undefined,
+  legacyBlock: boolean | undefined,
+): Pick<RuntimeConfig, "mode" | "blockMalicious"> {
+  if (mode) return { mode, blockMalicious: mode === "block" };
+  if (legacyBlock !== undefined) {
+    return {
+      mode: legacyBlock ? "block" : "shadow",
+      blockMalicious: legacyBlock,
+    };
+  }
+  return { blockMalicious: false };
 }
 
 function nonEmpty(value: unknown): string | undefined {
