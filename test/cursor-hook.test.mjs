@@ -80,6 +80,44 @@ test("configured pilot override wins and backend mode controls otherwise", () =>
   assert.equal(effectiveMode({ prediction: "MALICIOUS" }), "shadow");
 });
 
+test("bundled SDK enforces backend-selected Block when local mode is omitted", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestBodies = [];
+  globalThis.fetch = async (_input, init) => {
+    requestBodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({
+      prediction: "MALICIOUS",
+      score: 0.99,
+      threshold: 0.5,
+      mode: "block",
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  const env = { ...BASE_ENV };
+  delete env.SILMARIL_BLOCK_MALICIOUS;
+  const events = [];
+  try {
+    const output = await runCursorHook(
+      hookInput("beforeSubmitPrompt", { prompt: "unsafe prompt" }),
+      env,
+      { evidenceEmitter: async (event) => { events.push(event); } },
+    );
+    assert.deepEqual(output, {
+      continue: false,
+      user_message: "Silmaril Firewall blocked potentially malicious content.",
+    });
+    assert.equal(requestBodies.length, 1);
+    assert.equal(Object.hasOwn(requestBodies[0], "mode"), false);
+    assert.equal(events[0].mode, "block");
+    assert.equal(events[0].policyDecision, "block");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("runtime config defaults and rejects incomplete configuration", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-missing-config-"));
   const missingConfig = path.join(root, "missing.json");
