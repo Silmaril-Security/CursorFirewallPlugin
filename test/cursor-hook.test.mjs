@@ -80,6 +80,44 @@ test("configured pilot override wins and backend mode controls otherwise", () =>
   assert.equal(effectiveMode({ prediction: "MALICIOUS" }), "shadow");
 });
 
+test("bundled SDK enforces backend-selected Block when local mode is omitted", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestBodies = [];
+  globalThis.fetch = async (_input, init) => {
+    requestBodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({
+      prediction: "MALICIOUS",
+      score: 0.99,
+      threshold: 0.5,
+      mode: "block",
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  const env = { ...BASE_ENV };
+  delete env.SILMARIL_BLOCK_MALICIOUS;
+  const events = [];
+  try {
+    const output = await runCursorHook(
+      hookInput("beforeSubmitPrompt", { prompt: "unsafe prompt" }),
+      env,
+      { evidenceEmitter: async (event) => { events.push(event); } },
+    );
+    assert.deepEqual(output, {
+      continue: false,
+      user_message: "Silmaril Firewall blocked potentially malicious content.",
+    });
+    assert.equal(requestBodies.length, 1);
+    assert.equal(Object.hasOwn(requestBodies[0], "mode"), false);
+    assert.equal(events[0].mode, "block");
+    assert.equal(events[0].policyDecision, "block");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("runtime config defaults and rejects incomplete configuration", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-missing-config-"));
   const missingConfig = path.join(root, "missing.json");
@@ -466,7 +504,7 @@ test("local evidence is redacted and written atomically with private permissions
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-evidence-"));
   const event = buildLocalProtectionEvent({
     pluginName: "cursor-firewall-plugin",
-    pluginVersion: "0.2.0",
+    pluginVersion: "0.2.1",
     hook: "user_input",
     mode: "block",
     requestId: "raw-request-id",
@@ -532,9 +570,9 @@ test("package and Cursor manifests preserve release invariants", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const pluginJson = JSON.parse(await readFile(new URL("../.cursor-plugin/plugin.json", import.meta.url), "utf8"));
   const hooksJson = JSON.parse(await readFile(new URL("../hooks/hooks.json", import.meta.url), "utf8"));
-  assert.equal(packageJson.version, "0.2.0");
+  assert.equal(packageJson.version, "0.2.1");
   assert.equal(pluginJson.version, packageJson.version);
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.5.0");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.6.0");
   assert.equal(packageJson.private, true);
   assert.equal(hooksJson.hooks.beforeSubmitPrompt[0].failClosed, false);
   assert.equal(hooksJson.hooks.subagentStop[0].loop_limit, 1);

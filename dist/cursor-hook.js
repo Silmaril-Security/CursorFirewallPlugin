@@ -240,7 +240,7 @@ async function createLangChainHandler(firewall, options = {}) {
   const logger = options.logger ?? ((message, error) => {
     console.warn(`silmaril.firewall: ${message}`, error);
   });
-  const shadowMode = options.shadowMode ?? firewall.shadowMode;
+  const requestedMode = options.mode ?? (options.shadowMode === void 0 ? firewall.mode : options.shadowMode ? "shadow" : "block");
   const onClassify = options.onClassify;
   const fireOnClassify = (event) => {
     if (!onClassify) {
@@ -257,6 +257,7 @@ async function createLangChainHandler(firewall, options = {}) {
     try {
       result = await firewall.classify(text, {
         hook: hookLabel,
+        ...requestedMode !== void 0 ? { mode: requestedMode } : {},
         ...toolName !== void 0 ? { toolName } : {}
       });
     } catch (err) {
@@ -268,6 +269,7 @@ async function createLangChainHandler(firewall, options = {}) {
     }
     const threshold = result.threshold;
     const blocked = result.prediction === "MALICIOUS";
+    const effectiveMode2 = requestedMode ?? result.mode ?? "block";
     const commonEventFields = {
       hook: hookLabel,
       ...toolName !== void 0 ? { toolName } : {},
@@ -278,9 +280,10 @@ async function createLangChainHandler(firewall, options = {}) {
     fireOnClassify({
       ...commonEventFields,
       blocked,
-      shadowMode
+      mode: effectiveMode2,
+      shadowMode: effectiveMode2 === "shadow"
     });
-    if (!blocked || shadowMode) {
+    if (!blocked || effectiveMode2 !== "block") {
       return;
     }
     throw new FirewallBlockedException({
@@ -470,7 +473,7 @@ function findLastUserMessage(messages) {
 function createMiddleware(firewall, options = {}) {
   const scanInput = options.scanInput ?? true;
   const scanOutput = options.scanOutput ?? false;
-  const shadowMode = options.shadowMode ?? firewall.shadowMode;
+  const requestedMode = options.mode ?? (options.shadowMode === void 0 ? firewall.mode : options.shadowMode ? "shadow" : "block");
   const classifyOrBlock = async (text, hook, context = { toolName: void 0, toolCallId: void 0 }) => {
     if (!text.trim()) {
       return;
@@ -478,10 +481,15 @@ function createMiddleware(firewall, options = {}) {
     const { toolName, toolCallId } = context;
     const result = await firewall.classify(
       text,
-      toolName !== void 0 ? { hook, toolName } : { hook }
+      {
+        hook,
+        ...toolName !== void 0 ? { toolName } : {},
+        ...requestedMode !== void 0 ? { mode: requestedMode } : {}
+      }
     );
     const threshold = result.threshold;
     const blocked = result.prediction === "MALICIOUS";
+    const effectiveMode2 = requestedMode ?? result.mode ?? "block";
     const commonEventFields = {
       hook,
       ...toolName !== void 0 ? { toolName } : {},
@@ -492,9 +500,10 @@ function createMiddleware(firewall, options = {}) {
     options.onClassify?.({
       ...commonEventFields,
       blocked,
-      shadowMode
+      mode: effectiveMode2,
+      shadowMode: effectiveMode2 === "shadow"
     });
-    if (!blocked || shadowMode) {
+    if (!blocked || effectiveMode2 !== "block") {
       return;
     }
     const err = new FirewallBlockedException({
@@ -613,7 +622,13 @@ var Outcome = {
   SecretExposure: "secret_exposure",
   ControlAbuse: "control_abuse",
   SystemCompromise: "system_compromise",
-  ServiceDisruption: "service_disruption"
+  ServiceDisruption: "service_disruption",
+  CodeGeneration: "code_generation",
+  StoryScriptGeneration: "story_script_generation",
+  GameGeneration: "game_generation",
+  WebsiteGeneration: "website_generation",
+  ClickUpTermsViolation: "clickup_terms_violation",
+  TraditionalAiAbuse: "traditional_ai_abuse"
 };
 var PRIMARY_OUTCOMES = [
   Outcome.Benign,
@@ -621,14 +636,26 @@ var PRIMARY_OUTCOMES = [
   Outcome.SecretExposure,
   Outcome.ControlAbuse,
   Outcome.SystemCompromise,
-  Outcome.ServiceDisruption
+  Outcome.ServiceDisruption,
+  Outcome.CodeGeneration,
+  Outcome.StoryScriptGeneration,
+  Outcome.GameGeneration,
+  Outcome.WebsiteGeneration,
+  Outcome.ClickUpTermsViolation,
+  Outcome.TraditionalAiAbuse
 ];
 var HARMFUL_OUTCOMES = [
   Outcome.InformationDisclosure,
   Outcome.SecretExposure,
   Outcome.ControlAbuse,
   Outcome.SystemCompromise,
-  Outcome.ServiceDisruption
+  Outcome.ServiceDisruption,
+  Outcome.CodeGeneration,
+  Outcome.StoryScriptGeneration,
+  Outcome.GameGeneration,
+  Outcome.WebsiteGeneration,
+  Outcome.ClickUpTermsViolation,
+  Outcome.TraditionalAiAbuse
 ];
 var OUTCOME_DESCRIPTIONS = {
   [Outcome.Benign]: "No harmful firewall outcome detected.",
@@ -636,7 +663,13 @@ var OUTCOME_DESCRIPTIONS = {
   [Outcome.SecretExposure]: "Exposes credentials, tokens, API keys, cookies, passwords, signing keys, OAuth secrets, session material, or webhook secrets.",
   [Outcome.ControlAbuse]: "Misuses authorized tools or user privileges to send, change, approve, delete, operate, or bypass policy/RBAC without a stronger outcome.",
   [Outcome.SystemCompromise]: "Enables privilege escalation, account takeover, hostile integration or plugin takeover, persistence, lateral movement, attacker webhook registration, or code/plugin execution.",
-  [Outcome.ServiceDisruption]: "Causes downtime, lockout, degradation, alert suppression, destructive loops, resource exhaustion, cost spikes, or hidden outage evidence."
+  [Outcome.ServiceDisruption]: "Causes downtime, lockout, degradation, alert suppression, destructive loops, resource exhaustion, cost spikes, or hidden outage evidence.",
+  [Outcome.CodeGeneration]: "Requests generation or material modification of executable code, scripts, workflows, or configuration.",
+  [Outcome.StoryScriptGeneration]: "Requests generation of narrative prose, dialogue, scripts, or story artifacts.",
+  [Outcome.GameGeneration]: "Requests generation of a game, quest, level, mechanic, or playable experience.",
+  [Outcome.WebsiteGeneration]: "Requests generation of a website, landing page, storefront, or web experience.",
+  [Outcome.ClickUpTermsViolation]: "Requests content or actions that violate the configured ClickUp tenant policy.",
+  [Outcome.TraditionalAiAbuse]: "Requests unsafe AI assistance outside the concrete security outcome classes."
 };
 var PRIMARY_OUTCOME_SET = new Set(PRIMARY_OUTCOMES);
 var HARMFUL_OUTCOME_SET = new Set(HARMFUL_OUTCOMES);
@@ -699,12 +732,24 @@ function sanitizeText(text) {
   }
   return out;
 }
-var SDK_VERSION = "0.5.0";
+var SDK_VERSION = "0.6.0";
 var DEFAULT_TIMEOUT_MS = 1e4;
 var DEFAULT_MAX_RETRIES = 5;
 var MAX_BACKOFF_SECONDS = 30;
 var MAX_ERROR_BODY_BYTES = 1 << 16;
-function blockResultFromResponse(data) {
+function resolveMode(value, requestedMode) {
+  let responseMode;
+  if (value === "shadow" || value === "warn" || value === "block") {
+    responseMode = value;
+  } else if (value !== void 0) {
+    throw new Error("Firewall: response mode must be shadow, warn, or block");
+  }
+  return requestedMode ?? responseMode;
+}
+function legacyMode(shadowMode) {
+  return shadowMode === void 0 ? void 0 : shadowMode ? "shadow" : "block";
+}
+function blockResultFromResponse(data, requestedMode) {
   if (data.prediction !== "BENIGN" && data.prediction !== "MALICIOUS") {
     throw new Error("Firewall: response prediction must be BENIGN or MALICIOUS");
   }
@@ -713,6 +758,10 @@ function blockResultFromResponse(data) {
     score: Number(data.score),
     threshold: Number(data.threshold)
   };
+  const mode = resolveMode(data.mode, requestedMode);
+  if (mode !== void 0) {
+    result.mode = mode;
+  }
   if (data.primary_outcome !== void 0) {
     result.primaryOutcome = normalizePrimaryOutcome(data.primary_outcome);
   }
@@ -796,6 +845,7 @@ var Firewall = class {
   apiUrl;
   timeoutMs;
   shadowMode;
+  mode;
   headers;
   constructor(options) {
     if (!options.apiKey) {
@@ -810,7 +860,8 @@ var Firewall = class {
     if (typeof this.timeoutMs !== "number" || !Number.isFinite(this.timeoutMs) || this.timeoutMs < 0) {
       throw new Error(`Firewall: timeoutMs must be a finite non-negative number, got ${this.timeoutMs}`);
     }
-    this.shadowMode = options.shadowMode ?? false;
+    this.mode = options.mode ?? legacyMode(options.shadowMode);
+    this.shadowMode = this.mode === "shadow";
     this.headers = Object.freeze({
       "x-api-key": this.apiKey,
       "content-type": "application/json"
@@ -843,6 +894,10 @@ var Firewall = class {
     const payload = {
       texts: texts.map((text) => sanitizeText(text))
     };
+    const requestedMode = options.mode ?? this.mode;
+    if (requestedMode !== void 0) {
+      payload.mode = requestedMode;
+    }
     if (options.hooks && options.hooks.length > 0) {
       payload.hooks = options.hooks.map((h) => String(h));
     }
@@ -856,7 +911,7 @@ var Firewall = class {
       })
     );
     const data = await this.postWithRetry(payload);
-    return data.predictions.map((p) => blockResultFromResponse(p));
+    return data.predictions.map((p) => blockResultFromResponse(p, requestedMode));
   }
   asLangChainHandler(options = {}) {
     return Promise.resolve().then(() => (init_langchain(), langchain_exports)).then(
@@ -893,6 +948,10 @@ var Firewall = class {
   }
   async classifySingle(text, options, metadataInfo) {
     const payload = { text };
+    const requestedMode = options.mode ?? this.mode;
+    if (requestedMode !== void 0) {
+      payload.mode = requestedMode;
+    }
     if (options.hook !== void 0) {
       payload.hook = options.hook;
     }
@@ -901,7 +960,7 @@ var Firewall = class {
     }
     payload.metadata = withSdkMetadata(options.metadata, metadataInfo);
     const data = await this.postWithRetry(payload);
-    return blockResultFromResponse(data);
+    return blockResultFromResponse(data, requestedMode);
   }
 };
 init_exceptions();
@@ -1309,7 +1368,7 @@ function omitUndefined2(value) {
 
 // src/cursor-hook.ts
 var PLUGIN_NAME = "cursor-firewall-plugin";
-var PLUGIN_VERSION = "0.2.0";
+var PLUGIN_VERSION = "0.2.1";
 var MAX_STDIN_BYTES = 4 * 1024 * 1024;
 var MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 var MAX_TRANSCRIPT_SEGMENTS = 256;

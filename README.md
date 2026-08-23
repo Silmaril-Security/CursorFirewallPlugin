@@ -117,7 +117,7 @@ npm run pack:dry
 npm run install:local
 ```
 
-The committed `dist/cursor-hook.js` is rebuilt from TypeScript and bundles the pinned `@silmaril-security/sdk@0.5.0`, so users do not need to install dependencies after cloning a release.
+The committed `dist/cursor-hook.js` is rebuilt from TypeScript and bundles the pinned `@silmaril-security/sdk@0.6.0`, so backend-selected mode is preserved and users do not need to install dependencies after cloning a release.
 
 ## Security and license
 
