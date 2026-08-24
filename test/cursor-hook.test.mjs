@@ -177,6 +177,15 @@ test("governance context normalizes Cursor tool, MCP, and file-read resources", 
     agent: "cursor",
     resource: { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
   });
+  const explicitMcp = buildCursorTargets(hookInput("preToolUse", {
+    tool_name: "create_issue",
+    mcp_server_name: "github",
+    tool_input: { title: "Issue" },
+  }))[0];
+  assert.deepEqual(governanceContext(explicitMcp), {
+    agent: "cursor",
+    resource: { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
+  });
   const fileRead = buildCursorTargets(hookInput("beforeReadFile", {
     file_path: "/tmp/input.txt",
     content: "text",
