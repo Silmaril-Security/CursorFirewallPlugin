@@ -12,7 +12,6 @@ import {
   consumeOutputDecision,
   effectiveMode,
   governanceContext,
-  readCursorTranscriptSegments,
   resolveRuntimeConfig,
   runCursorHook,
   withProvenance,
@@ -496,84 +495,49 @@ test("decision cache is private, bounded, single-use, and expires", async () => 
   assert.equal(remaining.length, 1);
 });
 
-test("subagent transcript classifies messages, reasoning, calls, and results", async () => {
+test("subagent stop classifies only the current summary and never replays transcripts", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-transcript-"));
   const transcript = path.join(root, "child.jsonl");
-  await writeFile(transcript, [
-    JSON.stringify({ message: { role: "user", content: "request" } }),
-    JSON.stringify({ message: { role: "assistant", content: [{ type: "thinking", thinking: "reasoning" }, { type: "tool_use", id: "t1", name: "Shell", input: { command: "pwd" } }] } }),
-    JSON.stringify({ message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "result" }] } }),
-    JSON.stringify({ message: { role: "assistant", content: "summary" } }),
-  ].join("\n"));
-  const segments = readCursorTranscriptSegments(transcript);
-  assert.deepEqual(segments.map((segment) => segment.firewallHook), ["user_input", "llm_output", "tool_call", "tool_response", "llm_output"]);
+  await writeFile(transcript, Array.from({ length: 300 }, (_, index) => JSON.stringify({
+    message: { role: "user", content: `historical segment ${index}` },
+  })).join("\n"));
+  const input = hookInput("subagentStop", {
+    status: "completed",
+    loop_count: 0,
+    agent_transcript_path: transcript,
+    task: "already observed task",
+    summary: "current summary",
+  });
+  const targets = buildCursorTargets(input);
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].text, "current summary");
+  assert.equal(targets[0].firewallHook, "llm_output");
+  assert.equal(targets[0].metadata.source, "subagent_summary");
+  assert.equal(targets[0].metadata.transcriptSegmentIndex, undefined);
 
-  const results = segments.map((_, index) => index === 2 ? { prediction: "MALICIOUS" } : { prediction: "BENIGN" });
   const calls = [];
   const events = [];
   const output = await runCursorHook(
-    hookInput("subagentStop", { status: "completed", loop_count: 0, agent_transcript_path: transcript }),
+    input,
     { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" },
-    captureDependencies(results, events, calls),
+    captureDependencies([{ prediction: "MALICIOUS" }], events, calls),
   );
   assert.equal(output, undefined);
-  assert.equal(events[2].blockUnavailable, true);
-  assert.equal(events[2].nativeAction, "allowed");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].blockUnavailable, true);
+  assert.equal(events[0].nativeAction, "allowed");
   const classificationCalls = calls.filter((call) => Object.hasOwn(call, "text"));
-  assert.equal(classificationCalls.length, segments.length);
+  assert.equal(classificationCalls.length, 1);
   assert.equal(calls.some((call) => Object.hasOwn(call, "texts")), false);
-  assert.deepEqual(classificationCalls.map((call) => call.text), segments.map((segment) => segment.text));
-  assert.deepEqual(classificationCalls.map((call) => call.options.hook), segments.map((segment) => segment.firewallHook));
-  assert.equal(new Set(classificationCalls.map((call) => call.options.requestId)).size, segments.length);
-  assert.ok(classificationCalls.every((call) => typeof call.text === "string"));
-});
-
-test("subagent transcript starts individual calls concurrently", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-concurrent-"));
-  const transcript = path.join(root, "child.jsonl");
-  await writeFile(transcript, [
-    JSON.stringify({ message: { role: "user", content: "request" } }),
-    JSON.stringify({ message: { role: "assistant", content: "summary" } }),
-  ].join("\n"));
-  const segments = readCursorTranscriptSegments(transcript);
-  let releaseGate = () => {};
-  const gate = new Promise((resolve) => { releaseGate = resolve; });
-  const calls = [];
-  let batchCalls = 0;
-  class ConcurrentFirewall {
-    constructor(options) {
-      calls.push({ constructor: options });
-    }
-    async classify(text, options) {
-      calls.push({ text, options });
-      await gate;
-      return { prediction: "BENIGN" };
-    }
-    async classifyBatch() {
-      batchCalls += 1;
-      throw new Error("classifyBatch must not be called");
-    }
-  }
-
-  const pending = runCursorHook(
-    hookInput("subagentStop", { status: "completed", loop_count: 0, agent_transcript_path: transcript }),
-    BASE_ENV,
-    { firewallConstructor: ConcurrentFirewall, evidenceEmitter: async () => undefined },
-  );
-  try {
-    assert.equal(calls.filter((call) => Object.hasOwn(call, "text")).length, segments.length);
-    assert.equal(batchCalls, 0);
-  } finally {
-    releaseGate();
-  }
-  await pending;
+  assert.equal(classificationCalls[0].text, "current summary");
+  assert.equal(classificationCalls[0].options.hook, "llm_output");
 });
 
 test("local evidence is redacted and written atomically with private permissions", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-evidence-"));
   const event = buildLocalProtectionEvent({
     pluginName: "cursor-firewall-plugin",
-    pluginVersion: "0.2.2",
+    pluginVersion: "0.2.3",
     hook: "user_input",
     mode: "block",
     requestId: "raw-request-id",
@@ -639,7 +603,7 @@ test("package and Cursor manifests preserve release invariants", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const pluginJson = JSON.parse(await readFile(new URL("../.cursor-plugin/plugin.json", import.meta.url), "utf8"));
   const hooksJson = JSON.parse(await readFile(new URL("../hooks/hooks.json", import.meta.url), "utf8"));
-  assert.equal(packageJson.version, "0.2.2");
+  assert.equal(packageJson.version, "0.2.3");
   assert.equal(pluginJson.version, packageJson.version);
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.6.2");
   assert.equal(packageJson.private, true);

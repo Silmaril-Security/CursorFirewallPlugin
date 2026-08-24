@@ -1015,7 +1015,7 @@ init_hooks();
 
 // src/cursor-hook.ts
 import { createHash as createHash3 } from "node:crypto";
-import { readFileSync as readFileSync2, realpathSync, statSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // src/runtime-config.ts
@@ -1415,10 +1415,8 @@ function omitUndefined2(value) {
 
 // src/cursor-hook.ts
 var PLUGIN_NAME = "cursor-firewall-plugin";
-var PLUGIN_VERSION = "0.2.2";
+var PLUGIN_VERSION = "0.2.3";
 var MAX_STDIN_BYTES = 4 * 1024 * 1024;
-var MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
-var MAX_TRANSCRIPT_SEGMENTS = 256;
 var SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
 var DEFAULT_DEPENDENCIES = {
   firewallConstructor: Firewall,
@@ -1512,16 +1510,20 @@ function buildCursorTargets(input) {
     case "subagentStart":
       return makeTarget(readString(input.task), HookLabel.USER_INPUT, "subagent", "deny", "0", "Task", readString(input.tool_call_id), { source: "subagent_task" });
     case "subagentStop":
-      return buildSubagentTargets(input);
+      return makeTarget(readString(input.summary), HookLabel.LLM_OUTPUT, "subagent", "none", "0", void 0, void 0, { source: "subagent_summary" });
     default:
       return [];
   }
 }
 async function classifyTargets(firewall, targets, endpointId2) {
-  return Promise.all(targets.map(async (target) => ({
+  const [target] = targets;
+  if (!target || targets.length !== 1) {
+    throw new Error("Each Cursor hook event must produce exactly one classification target");
+  }
+  return [{
     target,
     result: await firewall.classify(target.text, classifyOptions(target, endpointId2))
-  })));
+  }];
 }
 async function handleAgentResponse(entry, config, env, deps) {
   if (!entry) return void 0;
@@ -1570,91 +1572,6 @@ async function emitEvidence(target, result, config, nativeBlocked, env, emitter)
     ...malicious && mode === "block" && !nativeBlocked ? { blockUnavailable: true } : {}
   });
   await Promise.resolve(emitter(event, env)).catch(() => void 0);
-}
-function buildSubagentTargets(input) {
-  const segments = readCursorTranscriptSegments(readString(input.agent_transcript_path));
-  const task = readString(input.task);
-  const summary = readString(input.summary);
-  if (task && !segments.some((segment) => segment.text === task)) {
-    segments.unshift({ text: task, firewallHook: HookLabel.USER_INPUT, evidenceHook: "subagent", source: "subagent_task" });
-  }
-  if (summary && !segments.some((segment) => segment.text === summary)) {
-    segments.push({ text: summary, firewallHook: HookLabel.LLM_OUTPUT, evidenceHook: "subagent", source: "subagent_summary" });
-  }
-  return segments.slice(-MAX_TRANSCRIPT_SEGMENTS).map((segment, index) => ({
-    hookEventName: "subagentStop",
-    text: segment.text,
-    firewallHook: segment.firewallHook,
-    evidenceHook: segment.evidenceHook,
-    requestId: logicalRequestId(input, `subagent-${index}-${sha2563(segment.text)}`),
-    ...readString(input.conversation_id) ? { sessionId: readString(input.conversation_id) } : {},
-    ...readString(input.generation_id) ? { generationId: readString(input.generation_id) } : {},
-    ...segment.toolName ? { toolName: segment.toolName } : {},
-    metadata: buildMetadata(input, { source: segment.source, transcriptSegmentIndex: index }),
-    nativeCapability: "none"
-  }));
-}
-function readCursorTranscriptSegments(transcriptPath) {
-  if (!transcriptPath) return [];
-  try {
-    if (statSync(transcriptPath).size > MAX_TRANSCRIPT_BYTES) return [];
-  } catch {
-    return [];
-  }
-  let encoded;
-  try {
-    encoded = readFileSync2(transcriptPath, "utf8");
-  } catch {
-    return [];
-  }
-  const segments = [];
-  const toolNames = /* @__PURE__ */ new Map();
-  for (const line of encoded.split(/\r?\n/u)) {
-    if (!line.trim()) continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const root = readRecord(parsed);
-    const message = readRecord(root?.message) ?? root;
-    if (!message) continue;
-    const role = readString(message.role) ?? readString(root?.role);
-    const content = message.content ?? root?.content;
-    if (typeof content === "string" && content.trim()) {
-      segments.push(messageSegment(content, role));
-      continue;
-    }
-    if (!Array.isArray(content)) continue;
-    for (const item of content) {
-      const part = readRecord(item);
-      if (!part) continue;
-      const type = readString(part.type);
-      if (type === "text") {
-        const text = readString(part.text);
-        if (text) segments.push(messageSegment(text, role));
-      } else if (type === "thinking" || type === "reasoning") {
-        const text = readString(part.thinking) ?? readString(part.text);
-        if (text) segments.push({ text, firewallHook: HookLabel.LLM_OUTPUT, evidenceHook: "subagent", source: "reasoning" });
-      } else if (type === "tool_use" || type === "tool_call") {
-        const toolUseId = readString(part.id) ?? readString(part.tool_call_id);
-        const toolName = readString(part.name) ?? readString(part.tool_name);
-        if (toolUseId && toolName) toolNames.set(toolUseId, toolName);
-        const text = stableStringify(part.input ?? part.arguments);
-        if (text) segments.push({ text, firewallHook: HookLabel.TOOL_CALL, evidenceHook: "subagent", source: "tool_call", ...toolName ? { toolName } : {} });
-      } else if (type === "tool_result") {
-        const toolUseId = readString(part.tool_use_id) ?? readString(part.tool_call_id);
-        const toolName = toolUseId ? toolNames.get(toolUseId) : void 0;
-        const text = stableStringify(part.content ?? part.result);
-        if (text) segments.push({ text, firewallHook: HookLabel.TOOL_RESPONSE, evidenceHook: "subagent", source: "tool_result", ...toolName ? { toolName } : {} });
-      }
-    }
-  }
-  return segments.slice(-MAX_TRANSCRIPT_SEGMENTS);
-}
-function messageSegment(text, role) {
-  return role === "assistant" ? { text, firewallHook: HookLabel.LLM_OUTPUT, evidenceHook: "subagent", source: "message" } : { text, firewallHook: HookLabel.USER_INPUT, evidenceHook: "subagent", source: "message" };
 }
 function classifyOptions(target, endpointId2) {
   return {
@@ -1833,7 +1750,6 @@ export {
   consumeOutputDecision,
   effectiveMode,
   governanceContext,
-  readCursorTranscriptSegments,
   resolveLocalEventDirectory,
   resolveRuntimeConfig,
   runCursorHook,

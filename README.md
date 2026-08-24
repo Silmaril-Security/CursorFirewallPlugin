@@ -70,11 +70,11 @@ Set `SILMARIL_LOCAL_EVENT_DIR` only when the default private evidence spool must
 | `stop` | `llm_output` | No classification | No mutation |
 | `afterAgentThought` | `llm_output` | Observe | None |
 | `subagentStart` | `user_input` | Observe | Deny spawn |
-| `subagentStop` | segment-native labels | Observe bounded transcript | Preserve completed output and record `block_unavailable` |
+| `subagentStop` | `llm_output` | Observe current summary | Preserve completed output and record `block_unavailable` |
 
 The generic `preToolUse` hook covers Shell, Read, Write, Delete, Task, and MCP tools. The separate `beforeReadFile` hook is retained because it exposes file contents before they reach the model.
 
-Subagent transcript capture is bounded to a 2 MiB host transcript and the latest 256 visible segments. Malformed, missing, oversized, or unknown transcript records fail open. Reasoning is classified only when Cursor explicitly exposes a completed reasoning block; it is never written to logs, evidence, or the output-decision cache.
+Every native hook event produces at most one classification. `subagentStop` classifies only the current `summary` and ignores `agent_transcript_path`; historical state is accumulated by the Firewall sequence cache from earlier incremental hooks. Reasoning is classified only through Cursor's native `afterAgentThought` event.
 
 Cursor Tab/inline-completion hooks are not included. Local plugin installation does not establish a supported cloud-agent distribution path, so cloud coverage is not claimed.
 
