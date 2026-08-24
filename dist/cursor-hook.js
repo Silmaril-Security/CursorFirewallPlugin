@@ -1613,11 +1613,11 @@ function classifyOptions(target, endpointId2) {
   return {
     hook: target.firewallHook,
     ...target.toolName ? { toolName: target.toolName } : {},
-    metadata: withProvenance(target.metadata, endpointId2),
+    metadata: withProvenance(target.metadata, endpointId2, governanceContext(target)),
     requestId: target.requestId
   };
 }
-function withProvenance(metadata, endpointId2) {
+function withProvenance(metadata, endpointId2, governance) {
   const existingSilmaril = metadata.silmaril && typeof metadata.silmaril === "object" && !Array.isArray(metadata.silmaril) ? metadata.silmaril : {};
   return {
     ...metadata,
@@ -1627,9 +1627,35 @@ function withProvenance(metadata, endpointId2) {
         schema_version: 1,
         ...endpointId2 ? { endpoint_id: endpointId2 } : {},
         harness: "cursor"
-      }
+      },
+      ...governance ? { governance } : {}
     }
   };
+}
+function governanceContext(target) {
+  if (target.hookEventName === "preToolUse" || target.hookEventName === "postToolUse" || target.hookEventName === "postToolUseFailure" || target.hookEventName === "beforeReadFile") {
+    const toolName = target.toolName ?? "unknown";
+    const mcp = parseMcpToolName(toolName, readString(target.metadata.mcpServerName));
+    return {
+      agent: "cursor",
+      resource: mcp ? { kind: "mcp_tool", id: mcp.toolId, parent_id: mcp.serverId } : { kind: "tool", id: toolName }
+    };
+  }
+  return {
+    agent: "cursor",
+    resource: { kind: "agent", id: "cursor" }
+  };
+}
+function parseMcpToolName(toolName, explicitServer) {
+  if (explicitServer) {
+    return { serverId: explicitServer, toolId: toolName };
+  }
+  const canonical = /^mcp__(.+?)__(.+)$/.exec(toolName);
+  if (canonical?.[1] && canonical[2]) {
+    return { serverId: canonical[1], toolId: canonical[2] };
+  }
+  const cursor = /^MCP:([^:]+):(.+)$/.exec(toolName);
+  return cursor?.[1] && cursor[2] ? { serverId: cursor[1], toolId: cursor[2] } : void 0;
 }
 function buildMetadata(input, extra) {
   return omitUndefined3({
@@ -1639,6 +1665,7 @@ function buildMetadata(input, extra) {
     generationId: readString(input.generation_id),
     toolUseId: readString(input.tool_use_id) ?? readString(input.tool_call_id),
     toolName: readString(input.tool_name),
+    mcpServerName: readString(input.mcp_server_name),
     cursorVersion: readString(input.cursor_version),
     workspaceCount: Array.isArray(input.workspace_roots) ? input.workspace_roots.length : void 0,
     ...extra
@@ -1663,7 +1690,7 @@ function effectiveMode(result, requestedMode) {
   return returned === "shadow" || returned === "warn" || returned === "block" ? returned : "shadow";
 }
 function isMalicious(result) {
-  return result.prediction === "MALICIOUS";
+  return result.prediction === "MALICIOUS" || readRecord(result.governance)?.action === "block";
 }
 function stableStringify(value) {
   if (value === void 0 || value === null) return "";
@@ -1758,6 +1785,7 @@ export {
   configurationPath,
   consumeOutputDecision,
   effectiveMode,
+  governanceContext,
   readCursorTranscriptSegments,
   resolveLocalEventDirectory,
   resolveRuntimeConfig,

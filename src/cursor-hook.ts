@@ -28,6 +28,14 @@ const MAX_TRANSCRIPT_SEGMENTS = 256;
 const SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
 
 type ClassificationResult = Record<string, unknown>;
+type GovernanceContext = {
+  agent: "cursor";
+  resource: {
+    kind: "agent" | "tool" | "mcp_server" | "mcp_tool";
+    id: string;
+    parent_id?: string;
+  };
+};
 type ClassifyOptions = { hook?: string; toolName?: string; metadata?: Record<string, unknown>; requestId?: string; mode?: FirewallMode };
 type FirewallClient = {
   classify(text: string, options?: ClassifyOptions): Promise<ClassificationResult>;
@@ -354,12 +362,16 @@ function classifyOptions(target: Target, endpointId?: string): ClassifyOptions {
   return {
     hook: target.firewallHook,
     ...(target.toolName ? { toolName: target.toolName } : {}),
-    metadata: withProvenance(target.metadata, endpointId),
+    metadata: withProvenance(target.metadata, endpointId, governanceContext(target)),
     requestId: target.requestId,
   };
 }
 
-export function withProvenance(metadata: Record<string, unknown>, endpointId?: string): Record<string, unknown> {
+export function withProvenance(
+  metadata: Record<string, unknown>,
+  endpointId?: string,
+  governance?: GovernanceContext,
+): Record<string, unknown> {
   const existingSilmaril = metadata.silmaril && typeof metadata.silmaril === "object" && !Array.isArray(metadata.silmaril)
     ? metadata.silmaril as Record<string, unknown>
     : {};
@@ -372,8 +384,50 @@ export function withProvenance(metadata: Record<string, unknown>, endpointId?: s
         ...(endpointId ? { endpoint_id: endpointId } : {}),
         harness: "cursor",
       },
+      ...(governance ? { governance } : {}),
     },
   };
+}
+
+export function governanceContext(
+  target: Pick<Target, "hookEventName" | "toolName" | "metadata">,
+): GovernanceContext {
+  if (
+    target.hookEventName === "preToolUse"
+    || target.hookEventName === "postToolUse"
+    || target.hookEventName === "postToolUseFailure"
+    || target.hookEventName === "beforeReadFile"
+  ) {
+    const toolName = target.toolName ?? "unknown";
+    const mcp = parseMcpToolName(toolName, readString(target.metadata.mcpServerName));
+    return {
+      agent: "cursor",
+      resource: mcp
+        ? { kind: "mcp_tool", id: mcp.toolId, parent_id: mcp.serverId }
+        : { kind: "tool", id: toolName },
+    };
+  }
+  return {
+    agent: "cursor",
+    resource: { kind: "agent", id: "cursor" },
+  };
+}
+
+function parseMcpToolName(
+  toolName: string,
+  explicitServer: string | undefined,
+): { serverId: string; toolId: string } | undefined {
+  if (explicitServer) {
+    return { serverId: explicitServer, toolId: toolName };
+  }
+  const canonical = /^mcp__(.+?)__(.+)$/.exec(toolName);
+  if (canonical?.[1] && canonical[2]) {
+    return { serverId: canonical[1], toolId: canonical[2] };
+  }
+  const cursor = /^MCP:([^:]+):(.+)$/.exec(toolName);
+  return cursor?.[1] && cursor[2]
+    ? { serverId: cursor[1], toolId: cursor[2] }
+    : undefined;
 }
 
 function buildMetadata(input: HookRecord, extra: Record<string, unknown>): Record<string, unknown> {
@@ -384,6 +438,7 @@ function buildMetadata(input: HookRecord, extra: Record<string, unknown>): Recor
     generationId: readString(input.generation_id),
     toolUseId: readString(input.tool_use_id) ?? readString(input.tool_call_id),
     toolName: readString(input.tool_name),
+    mcpServerName: readString(input.mcp_server_name),
     cursorVersion: readString(input.cursor_version),
     workspaceCount: Array.isArray(input.workspace_roots) ? input.workspace_roots.length : undefined,
     ...extra,
@@ -416,7 +471,8 @@ export function effectiveMode(
 }
 
 function isMalicious(result: ClassificationResult): boolean {
-  return result.prediction === "MALICIOUS";
+  return result.prediction === "MALICIOUS"
+    || readRecord(result.governance)?.action === "block";
 }
 
 function stableStringify(value: unknown): string {
