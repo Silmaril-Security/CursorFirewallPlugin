@@ -4,7 +4,7 @@
 
 Cursor starts `dist/cursor-hook.js` as a fresh command process and sends one JSON hook event over stdin. The hook validates configuration, maps the event to a Firewall label, invokes the pinned SDK with a stable logical request ID, emits privacy-safe local evidence, and writes at most one host-native JSON response to stdout.
 
-All configuration, input parsing, SDK construction, classification, local evidence, and transcript parsing failures are fail-open. Debug output uses stderr and contains metadata only.
+All configuration, input parsing, SDK construction, classification, and local evidence failures are fail-open. Debug output uses stderr and contains metadata only.
 
 ## Enforcement boundaries
 
@@ -12,7 +12,7 @@ Prompt submission, pre-tool use, file reads, and subagent starts support direct 
 
 Cursor exposes assistant output after generation but does not provide a genuine native cancel primitive at that boundary. Block therefore preserves completed assistant and subagent output and records `block_unavailable`.
 
-Subagent completion reads at most 2 MiB and classifies at most the latest 256 host-visible transcript segments. It never interprets encrypted or unavailable reasoning.
+Each native Cursor event produces at most one classification. Subagent completion classifies only the current summary and never reads host transcripts. Conversation state is owned by the Firewall sequence cache.
 
 ## Trust boundaries
 

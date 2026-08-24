@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3
+
+- Stop replaying child transcripts at `subagentStop`; classify only the current summary and rely on the Firewall sequence cache for conversation state.
+
 ## 0.2.2
 
 - Add normalized agent, hook, MCP, tool, file, and subagent governance context.
