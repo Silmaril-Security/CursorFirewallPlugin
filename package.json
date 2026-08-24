@@ -1,6 +1,6 @@
 {
   "name": "@silmaril/cursor-firewall-plugin",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Silmaril Firewall lifecycle protection for Cursor agents and subagents.",
   "type": "module",
   "private": true,
@@ -31,7 +31,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@silmaril-security/sdk": "0.6.0"
+    "@silmaril-security/sdk": "0.6.2"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

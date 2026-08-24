@@ -1,7 +1,7 @@
 {
   "name": "silmaril-firewall",
   "displayName": "Silmaril Firewall",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Classifies Cursor prompts, tool activity, file reads, outputs, reasoning, and subagents with Silmaril Firewall.",
   "author": {
     "name": "Silmaril Security"

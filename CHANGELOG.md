@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- Add normalized agent, hook, MCP, tool, file, and subagent governance context.
+- Preserve Shadow and Warn pass-through behavior while allowing governance
+  blocks to use Cursor's existing native Block-mode boundaries.
+- Bundle TypeScript SDK 0.6.2 and publish the governance-capable plugin version.
+
 ## 0.2.1
 
 - Preserve the backend-selected effective mode by bundling TypeScript SDK 0.6.0.
