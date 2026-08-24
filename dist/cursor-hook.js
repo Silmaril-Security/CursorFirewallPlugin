@@ -62,6 +62,9 @@ var init_exceptions = __esm({
       }
       static formatMessage(params) {
         const truncated = params.promptText.length > MAX_PROMPT_DISPLAY_LEN ? `${params.promptText.slice(0, MAX_PROMPT_DISPLAY_LEN)}...` : params.promptText;
+        if (params.result?.prediction !== "MALICIOUS" && params.result?.governance?.action === "block") {
+          return `Request blocked by Silmaril Firewall governance policy: '${truncated}'`;
+        }
         return `Request blocked by Silmaril Firewall (score=${params.score.toFixed(4)}, threshold=${params.threshold.toFixed(4)}): '${truncated}'`;
       }
     };
@@ -268,7 +271,7 @@ async function createLangChainHandler(firewall, options = {}) {
       return;
     }
     const threshold = result.threshold;
-    const blocked = result.prediction === "MALICIOUS";
+    const blocked = result.prediction === "MALICIOUS" || result.governance?.action === "block";
     const effectiveMode2 = requestedMode ?? result.mode ?? "block";
     const commonEventFields = {
       hook: hookLabel,
@@ -488,7 +491,7 @@ function createMiddleware(firewall, options = {}) {
       }
     );
     const threshold = result.threshold;
-    const blocked = result.prediction === "MALICIOUS";
+    const blocked = result.prediction === "MALICIOUS" || result.governance?.action === "block";
     const effectiveMode2 = requestedMode ?? result.mode ?? "block";
     const commonEventFields = {
       hook,
@@ -732,7 +735,7 @@ function sanitizeText(text) {
   }
   return out;
 }
-var SDK_VERSION = "0.6.0";
+var SDK_VERSION = "0.6.2";
 var DEFAULT_TIMEOUT_MS = 1e4;
 var DEFAULT_MAX_RETRIES = 5;
 var MAX_BACKOFF_SECONDS = 30;
@@ -783,6 +786,9 @@ function blockResultFromResponse(data, requestedMode) {
       result.detectorCounts = detectorCounts;
     }
   }
+  if (data.governance !== void 0) {
+    result.governance = governanceDecisionFromResponse(data.governance);
+  }
   return Object.freeze(result);
 }
 function isRecord2(value) {
@@ -799,9 +805,41 @@ function withSdkMetadata(metadata, info) {
     sdk_language: "typescript",
     sdk_version: SDK_VERSION,
     request_id: info.requestId,
-    ...info.inputIndex === void 0 ? {} : { input_index: info.inputIndex }
+    ...info.inputIndex === void 0 ? {} : { input_index: info.inputIndex },
+    ...info.governance === void 0 ? {} : { governance: governanceContextToWire(info.governance) }
   };
   return payload;
+}
+function governanceContextToWire(context) {
+  return {
+    ...context.agent === void 0 ? {} : { agent: context.agent },
+    ...context.resource === void 0 ? {} : {
+      resource: {
+        kind: context.resource.kind,
+        ...context.resource.id === void 0 ? {} : { id: context.resource.id },
+        ...context.resource.parentId === void 0 ? {} : { parent_id: context.resource.parentId }
+      }
+    }
+  };
+}
+function governanceDecisionFromResponse(value) {
+  if (!isRecord2(value)) {
+    throw new Error("Firewall: response governance must be an object");
+  }
+  if (value.action !== "allow" && value.action !== "block") {
+    throw new Error("Firewall: response governance action must be allow or block");
+  }
+  if (typeof value.policy_version !== "string" || value.policy_version.length === 0) {
+    throw new Error("Firewall: response governance policy_version must be a non-empty string");
+  }
+  if (value.rule_id !== void 0 && typeof value.rule_id !== "string") {
+    throw new Error("Firewall: response governance rule_id must be a string when provided");
+  }
+  return Object.freeze({
+    action: value.action,
+    ...value.rule_id === void 0 ? {} : { ruleId: value.rule_id },
+    policyVersion: value.policy_version
+  });
 }
 async function readCappedErrorBody(response) {
   if (!response.body) {
@@ -890,6 +928,11 @@ var Firewall = class {
         `Firewall: metadata length ${options.metadata.length} does not match texts length ${texts.length}`
       );
     }
+    if (options.governance !== void 0 && options.governance.length !== texts.length) {
+      throw new Error(
+        `Firewall: governance length ${options.governance.length} does not match texts length ${texts.length}`
+      );
+    }
     const requestId = options.requestId ?? randomUUID();
     const payload = {
       texts: texts.map((text) => sanitizeText(text))
@@ -907,7 +950,8 @@ var Firewall = class {
     payload.metadata = texts.map(
       (_, index) => withSdkMetadata(options.metadata?.[index], {
         requestId,
-        inputIndex: index
+        inputIndex: index,
+        ...options.governance?.[index] === void 0 ? {} : { governance: options.governance[index] }
       })
     );
     const data = await this.postWithRetry(payload);
@@ -958,7 +1002,10 @@ var Firewall = class {
     if (options.toolName !== void 0) {
       payload.tool_name = options.toolName;
     }
-    payload.metadata = withSdkMetadata(options.metadata, metadataInfo);
+    payload.metadata = withSdkMetadata(options.metadata, {
+      ...metadataInfo,
+      ...options.governance === void 0 ? {} : { governance: options.governance }
+    });
     const data = await this.postWithRetry(payload);
     return blockResultFromResponse(data, requestedMode);
   }
@@ -1368,7 +1415,7 @@ function omitUndefined2(value) {
 
 // src/cursor-hook.ts
 var PLUGIN_NAME = "cursor-firewall-plugin";
-var PLUGIN_VERSION = "0.2.1";
+var PLUGIN_VERSION = "0.2.2";
 var MAX_STDIN_BYTES = 4 * 1024 * 1024;
 var MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 var MAX_TRANSCRIPT_SEGMENTS = 256;
@@ -1613,11 +1660,11 @@ function classifyOptions(target, endpointId2) {
   return {
     hook: target.firewallHook,
     ...target.toolName ? { toolName: target.toolName } : {},
-    metadata: withProvenance(target.metadata, endpointId2),
+    metadata: withProvenance(target.metadata, endpointId2, governanceContext(target)),
     requestId: target.requestId
   };
 }
-function withProvenance(metadata, endpointId2) {
+function withProvenance(metadata, endpointId2, governance) {
   const existingSilmaril = metadata.silmaril && typeof metadata.silmaril === "object" && !Array.isArray(metadata.silmaril) ? metadata.silmaril : {};
   return {
     ...metadata,
@@ -1627,9 +1674,35 @@ function withProvenance(metadata, endpointId2) {
         schema_version: 1,
         ...endpointId2 ? { endpoint_id: endpointId2 } : {},
         harness: "cursor"
-      }
+      },
+      ...governance ? { governance } : {}
     }
   };
+}
+function governanceContext(target) {
+  if (target.hookEventName === "preToolUse" || target.hookEventName === "postToolUse" || target.hookEventName === "postToolUseFailure" || target.hookEventName === "beforeReadFile") {
+    const toolName = target.toolName ?? "unknown";
+    const mcp = parseMcpToolName(toolName, readString(target.metadata.mcpServerName));
+    return {
+      agent: "cursor",
+      resource: mcp ? { kind: "mcp_tool", id: mcp.toolId, parent_id: mcp.serverId } : { kind: "tool", id: toolName }
+    };
+  }
+  return {
+    agent: "cursor",
+    resource: { kind: "agent", id: "cursor" }
+  };
+}
+function parseMcpToolName(toolName, explicitServer) {
+  if (explicitServer) {
+    return { serverId: explicitServer, toolId: toolName };
+  }
+  const canonical = /^mcp__(.+?)__(.+)$/.exec(toolName);
+  if (canonical?.[1] && canonical[2]) {
+    return { serverId: canonical[1], toolId: canonical[2] };
+  }
+  const cursor = /^MCP:([^:]+):(.+)$/.exec(toolName);
+  return cursor?.[1] && cursor[2] ? { serverId: cursor[1], toolId: cursor[2] } : void 0;
 }
 function buildMetadata(input, extra) {
   return omitUndefined3({
@@ -1639,6 +1712,7 @@ function buildMetadata(input, extra) {
     generationId: readString(input.generation_id),
     toolUseId: readString(input.tool_use_id) ?? readString(input.tool_call_id),
     toolName: readString(input.tool_name),
+    mcpServerName: readString(input.mcp_server_name),
     cursorVersion: readString(input.cursor_version),
     workspaceCount: Array.isArray(input.workspace_roots) ? input.workspace_roots.length : void 0,
     ...extra
@@ -1663,7 +1737,7 @@ function effectiveMode(result, requestedMode) {
   return returned === "shadow" || returned === "warn" || returned === "block" ? returned : "shadow";
 }
 function isMalicious(result) {
-  return result.prediction === "MALICIOUS";
+  return result.prediction === "MALICIOUS" || readRecord(result.governance)?.action === "block";
 }
 function stableStringify(value) {
   if (value === void 0 || value === null) return "";
@@ -1758,6 +1832,7 @@ export {
   configurationPath,
   consumeOutputDecision,
   effectiveMode,
+  governanceContext,
   readCursorTranscriptSegments,
   resolveLocalEventDirectory,
   resolveRuntimeConfig,

@@ -11,6 +11,7 @@ import {
   buildLocalProtectionEvent,
   consumeOutputDecision,
   effectiveMode,
+  governanceContext,
   readCursorTranscriptSegments,
   resolveRuntimeConfig,
   runCursorHook,
@@ -159,6 +160,42 @@ test("plugin-owned provenance overwrites caller values and preserves unrelated m
   });
 });
 
+test("governance context normalizes Cursor tool, MCP, and file-read resources", () => {
+  assert.deepEqual(governanceContext({
+    hookEventName: "preToolUse",
+    toolName: "Shell",
+    metadata: {},
+  }), {
+    agent: "cursor",
+    resource: { kind: "tool", id: "Shell" },
+  });
+  assert.deepEqual(governanceContext({
+    hookEventName: "preToolUse",
+    toolName: "mcp__github__create_issue",
+    metadata: {},
+  }), {
+    agent: "cursor",
+    resource: { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
+  });
+  const explicitMcp = buildCursorTargets(hookInput("preToolUse", {
+    tool_name: "create_issue",
+    mcp_server_name: "github",
+    tool_input: { title: "Issue" },
+  }))[0];
+  assert.deepEqual(governanceContext(explicitMcp), {
+    agent: "cursor",
+    resource: { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
+  });
+  const fileRead = buildCursorTargets(hookInput("beforeReadFile", {
+    file_path: "/tmp/input.txt",
+    content: "text",
+  }))[0];
+  assert.deepEqual(governanceContext(fileRead), {
+    agent: "cursor",
+    resource: { kind: "tool", id: "Read" },
+  });
+});
+
 test("runtime config treats a private host file as authoritative", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-config-"));
   const configPath = path.join(root, "silmaril-firewall.json");
@@ -275,6 +312,38 @@ test("shadow mode observes without returning hook output", async () => {
   assert.equal(events[0].policyDecision, "monitor");
   assert.equal(events[0].mode, "shadow");
   assert.doesNotMatch(JSON.stringify(events[0]), /raw-shadow-secret/u);
+});
+
+test("governance blocks deny only supported pre-execution hooks in block mode", async () => {
+  const decision = {
+    prediction: "BENIGN",
+    governance: { action: "block", rule_id: "block-shell", policy_version: "v1" },
+  };
+  const prompt = hookInput("beforeSubmitPrompt", { prompt: "prompt" });
+
+  assert.equal(
+    await runCursorHook(prompt, { ...BASE_ENV, SILMARIL_MODE: "shadow" }, captureDependencies([decision])),
+    undefined,
+  );
+  assert.equal(
+    await runCursorHook(prompt, { ...BASE_ENV, SILMARIL_MODE: "warn" }, captureDependencies([decision])),
+    undefined,
+  );
+  const blocked = await runCursorHook(
+    prompt,
+    { ...BASE_ENV, SILMARIL_MODE: "block" },
+    captureDependencies([decision]),
+  );
+  assert.equal(blocked.continue, false);
+
+  assert.equal(
+    await runCursorHook(
+      hookInput("postToolUse", { tool_name: "Shell", tool_output: "done" }),
+      { ...BASE_ENV, SILMARIL_MODE: "block" },
+      captureDependencies([decision]),
+    ),
+    undefined,
+  );
 });
 
 test("only exact MALICIOUS blocks prompts and tools", async () => {
@@ -504,7 +573,7 @@ test("local evidence is redacted and written atomically with private permissions
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-evidence-"));
   const event = buildLocalProtectionEvent({
     pluginName: "cursor-firewall-plugin",
-    pluginVersion: "0.2.1",
+    pluginVersion: "0.2.2",
     hook: "user_input",
     mode: "block",
     requestId: "raw-request-id",
@@ -570,9 +639,9 @@ test("package and Cursor manifests preserve release invariants", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const pluginJson = JSON.parse(await readFile(new URL("../.cursor-plugin/plugin.json", import.meta.url), "utf8"));
   const hooksJson = JSON.parse(await readFile(new URL("../hooks/hooks.json", import.meta.url), "utf8"));
-  assert.equal(packageJson.version, "0.2.1");
+  assert.equal(packageJson.version, "0.2.2");
   assert.equal(pluginJson.version, packageJson.version);
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.6.0");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.6.2");
   assert.equal(packageJson.private, true);
   assert.equal(hooksJson.hooks.beforeSubmitPrompt[0].failClosed, false);
   assert.equal(hooksJson.hooks.subagentStop[0].loop_limit, 1);
