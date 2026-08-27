@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.4
+
+- Restore Cursor-native malicious MCP tool-result replacement in Block mode.
+
 ## 0.2.3
 
 - Stop replaying child transcripts at `subagentStop`; classify only the current summary and rely on the Firewall sequence cache for conversation state.
