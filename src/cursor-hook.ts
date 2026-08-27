@@ -21,7 +21,7 @@ export { buildLocalProtectionEvent, resolveLocalEventDirectory, writeLocalProtec
 export { configurationPath, resolveRuntimeConfig } from "./runtime-config.js";
 
 export const PLUGIN_NAME = "cursor-firewall-plugin";
-export const PLUGIN_VERSION = "0.2.3";
+export const PLUGIN_VERSION = "0.2.4";
 const MAX_STDIN_BYTES = 4 * 1024 * 1024;
 const SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
 
@@ -53,7 +53,7 @@ type Target = {
   toolName?: string;
   toolUseId?: string;
   metadata: Record<string, unknown>;
-  nativeCapability: "none" | "deny";
+  nativeCapability: "none" | "deny" | "replace_mcp";
 };
 
 type RuntimeDependencies = {
@@ -164,7 +164,11 @@ export function buildCursorTargets(input: HookRecord): Target[] {
     case "beforeReadFile":
       return makeTarget(readString(input.content), HookLabel.TOOL_RESPONSE, "tool_result", "deny", "0", "Read");
     case "postToolUse": {
-      return makeTarget(readTextOrSerialized(input.tool_output), HookLabel.TOOL_RESPONSE, "post_tool", "none");
+      const toolName = readString(input.tool_name);
+      const capability = parseMcpToolName(toolName ?? "", readString(input.mcp_server_name))
+        ? "replace_mcp"
+        : "none";
+      return makeTarget(readTextOrSerialized(input.tool_output), HookLabel.TOOL_RESPONSE, "post_tool", capability);
     }
     case "postToolUseFailure":
       return makeTarget(readString(input.error_message), HookLabel.TOOL_RESPONSE, "post_tool", "none");
@@ -219,7 +223,12 @@ function buildBlockOutput(target: Target, input: HookRecord): HookOutput | undef
     case "beforeReadFile":
       return { permission: "deny", user_message: SAFE_BLOCK_MESSAGE };
     case "postToolUse":
-      return undefined;
+      return target.nativeCapability === "replace_mcp"
+        ? {
+            updated_mcp_tool_output: { error: SAFE_BLOCK_MESSAGE },
+            additional_context: SAFE_BLOCK_MESSAGE,
+          }
+        : undefined;
     case "subagentStart":
       return { permission: "deny", user_message: SAFE_BLOCK_MESSAGE };
     default:
@@ -230,7 +239,7 @@ function buildBlockOutput(target: Target, input: HookRecord): HookOutput | undef
 function shouldNativeBlock(target: Target, result: ClassificationResult, config: RuntimeConfig, _input: HookRecord): boolean {
   return effectiveMode(result, config.mode) === "block"
     && isMalicious(result)
-    && target.nativeCapability === "deny";
+    && target.nativeCapability !== "none";
 }
 
 async function emitEvidence(
@@ -249,7 +258,7 @@ async function emitEvidence(
       ? "monitor"
       : "allow";
   const nativeAction: LocalEvidenceInput["nativeAction"] = nativeBlocked
-    ? "block_returned"
+    ? target.nativeCapability === "replace_mcp" ? "content_replaced" : "block_returned"
     : "allowed";
   const event = buildLocalProtectionEvent({
     pluginName: PLUGIN_NAME,

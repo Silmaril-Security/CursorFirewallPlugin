@@ -64,7 +64,7 @@ Set `SILMARIL_LOCAL_EVENT_DIR` only when the default private evidence spool must
 | `beforeSubmitPrompt` | `user_input` | Observe | Prevent prompt submission |
 | `preToolUse` | `tool_call` | Observe | Deny tool execution |
 | `beforeReadFile` | `tool_response` | Observe | Deny content before model consumption |
-| `postToolUse` | `tool_response` | Observe | Preserve completed result and record `block_unavailable` |
+| `postToolUse` | `tool_response` | Observe | Replace MCP tool output; generic tools record `block_unavailable` |
 | `postToolUseFailure` | `tool_response` | Observe | None |
 | `afterAgentResponse` | `llm_output` | Observe | Preserve completed response and record `block_unavailable` |
 | `stop` | `llm_output` | No classification | No mutation |
@@ -82,7 +82,7 @@ Cursor Tab/inline-completion hooks are not included. Local plugin installation d
 
 Shadow mode returns no hook output. Omit mode to use the backend, set `SILMARIL_MODE=block` for a pilot override, or use the legacy block boolean. A result blocks only when `prediction === "MALICIOUS"`; casing variants and unknown values never block.
 
-Post-execution hooks cannot undo tool side effects, so completed tool, assistant, and subagent output is preserved. These boundaries record `block_unavailable` instead of returning replacement content or a follow-up response.
+Post-execution hooks cannot undo tool side effects. Cursor nevertheless exposes `updated_mcp_tool_output`, so malicious MCP results are replaced before model reuse. Generic tool results and other unsupported completed-output boundaries remain unchanged and record `block_unavailable`.
 
 ## Local evidence
 

@@ -380,7 +380,7 @@ test("beforeReadFile blocks before model consumption", async () => {
   assert.equal(output.permission, "deny");
 });
 
-test("postToolUse never replaces content and records unavailable block", async () => {
+test("postToolUse replaces MCP output while generic tools stay explicitly unavailable", async () => {
   const env = { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" };
   const events = [];
   const generic = await runCursorHook(
@@ -389,13 +389,25 @@ test("postToolUse never replaces content and records unavailable block", async (
     captureDependencies([{ prediction: "MALICIOUS" }], events),
   );
   assert.equal(generic, undefined);
-  const mcp = await runCursorHook(
-    hookInput("postToolUse", { tool_name: "MCP:fetch", tool_output: "unsafe" }),
-    env,
-    captureDependencies([{ prediction: "MALICIOUS" }], events),
-  );
-  assert.equal(mcp, undefined);
-  assert.ok(events.every((event) => event.blockUnavailable === true));
+  for (const identity of [
+    { tool_name: "MCP:github:fetch" },
+    { tool_name: "mcp__github__fetch" },
+    { tool_name: "fetch", mcp_server_name: "github" },
+  ]) {
+    const mcp = await runCursorHook(
+      hookInput("postToolUse", { ...identity, tool_output: "unsafe" }),
+      env,
+      captureDependencies([{ prediction: "MALICIOUS" }], events),
+    );
+    assert.deepEqual(mcp, {
+      updated_mcp_tool_output: { error: "Silmaril Firewall blocked potentially malicious content." },
+      additional_context: "Silmaril Firewall blocked potentially malicious content.",
+    });
+    assert.doesNotMatch(JSON.stringify(mcp), /unsafe/u);
+  }
+  assert.equal(events[0].blockUnavailable, true);
+  assert.ok(events.slice(1).every((event) => event.blockUnavailable === undefined));
+  assert.ok(events.slice(1).every((event) => event.nativeAction === "content_replaced"));
 });
 
 test("warn mode remains unchanged where Cursor cannot deliver same-turn context", async () => {
@@ -537,7 +549,7 @@ test("local evidence is redacted and written atomically with private permissions
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-evidence-"));
   const event = buildLocalProtectionEvent({
     pluginName: "cursor-firewall-plugin",
-    pluginVersion: "0.2.3",
+    pluginVersion: "0.2.4",
     hook: "user_input",
     mode: "block",
     requestId: "raw-request-id",
@@ -603,7 +615,7 @@ test("package and Cursor manifests preserve release invariants", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const pluginJson = JSON.parse(await readFile(new URL("../.cursor-plugin/plugin.json", import.meta.url), "utf8"));
   const hooksJson = JSON.parse(await readFile(new URL("../hooks/hooks.json", import.meta.url), "utf8"));
-  assert.equal(packageJson.version, "0.2.3");
+  assert.equal(packageJson.version, "0.2.4");
   assert.equal(pluginJson.version, packageJson.version);
   assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.6.2");
   assert.equal(packageJson.private, true);
