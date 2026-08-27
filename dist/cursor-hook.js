@@ -1500,7 +1500,7 @@ function buildCursorTargets(input) {
       return makeTarget(readString(input.content), HookLabel.TOOL_RESPONSE, "tool_result", "deny", "0", "Read");
     case "postToolUse": {
       const toolName = readString(input.tool_name);
-      const capability = toolName?.startsWith("MCP:") ? "replace_mcp" : "none";
+      const capability = parseMcpToolName(toolName ?? "", readString(input.mcp_server_name)) ? "replace_mcp" : "none";
       return makeTarget(readTextOrSerialized(input.tool_output), HookLabel.TOOL_RESPONSE, "post_tool", capability);
     }
     case "postToolUseFailure":

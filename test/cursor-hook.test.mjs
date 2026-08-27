@@ -389,19 +389,25 @@ test("postToolUse replaces MCP output while generic tools stay explicitly unavai
     captureDependencies([{ prediction: "MALICIOUS" }], events),
   );
   assert.equal(generic, undefined);
-  const mcp = await runCursorHook(
-    hookInput("postToolUse", { tool_name: "MCP:fetch", tool_output: "unsafe" }),
-    env,
-    captureDependencies([{ prediction: "MALICIOUS" }], events),
-  );
-  assert.deepEqual(mcp, {
-    updated_mcp_tool_output: { error: "Silmaril Firewall blocked potentially malicious content." },
-    additional_context: "Silmaril Firewall blocked potentially malicious content.",
-  });
-  assert.doesNotMatch(JSON.stringify(mcp), /unsafe/u);
+  for (const identity of [
+    { tool_name: "MCP:github:fetch" },
+    { tool_name: "mcp__github__fetch" },
+    { tool_name: "fetch", mcp_server_name: "github" },
+  ]) {
+    const mcp = await runCursorHook(
+      hookInput("postToolUse", { ...identity, tool_output: "unsafe" }),
+      env,
+      captureDependencies([{ prediction: "MALICIOUS" }], events),
+    );
+    assert.deepEqual(mcp, {
+      updated_mcp_tool_output: { error: "Silmaril Firewall blocked potentially malicious content." },
+      additional_context: "Silmaril Firewall blocked potentially malicious content.",
+    });
+    assert.doesNotMatch(JSON.stringify(mcp), /unsafe/u);
+  }
   assert.equal(events[0].blockUnavailable, true);
-  assert.equal(events[1].blockUnavailable, undefined);
-  assert.equal(events[1].nativeAction, "content_replaced");
+  assert.ok(events.slice(1).every((event) => event.blockUnavailable === undefined));
+  assert.ok(events.slice(1).every((event) => event.nativeAction === "content_replaced"));
 });
 
 test("warn mode remains unchanged where Cursor cannot deliver same-turn context", async () => {
