@@ -456,10 +456,14 @@ export function refreshMacDeviceNameForTests(): Promise<void> {
   try {
     const lease = claimDeviceNameRefreshLease(macDeviceNameDeps.homeDirectory, macDeviceNameDeps.now());
     if (!lease) return Promise.resolve();
-    return refreshMacDeviceName(macDeviceNameGeneration, macDeviceNameDeps, lease.owner, lease.epoch);
+    return runMacDeviceNameRefreshForTests(lease.owner, lease.epoch);
   } catch {
     return Promise.resolve();
   }
+}
+
+export function runMacDeviceNameRefreshForTests(owner: string, epoch: number): Promise<void> {
+  return refreshMacDeviceName(macDeviceNameGeneration, macDeviceNameDeps, owner, epoch);
 }
 
 function deviceNameStateDirectory(homeDirectory: string): string {
@@ -650,7 +654,6 @@ function claimDeviceNameRefreshLease(homeDirectory: string, now: number): Device
     const directoryStat = lstatSync(directory);
     if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) return undefined;
     chmodSync(directory, 0o700);
-    cleanupOlderDeviceNameGenerations(homeDirectory, epoch);
     const owner = randomBytes(16).toString("hex");
     const payload = JSON.stringify({ v: 1, owner, epoch });
     const created = createExclusiveDeviceNameLock(deviceNameLockPath(homeDirectory, epoch), payload);
@@ -676,7 +679,7 @@ function cleanupOlderDeviceNameGenerations(homeDirectory: string, epoch: number)
       unlinkDeviceNameGeneration(path.join(directory, entry.name));
     }
   } catch {
-    // Retaining an old name must not abort classification or this refresh.
+    // Retaining an old name must not abort the refresh worker.
   }
 }
 
@@ -763,9 +766,9 @@ function newerDeviceNameIsPublished(homeDirectory: string, epoch: number, now: n
 
 // Each Cursor event is a new process. A fresh per-user file supplies the last
 // validated name without waiting on scutil. A cold or expired cache omits the
-// name. One exclusive lock file per time bucket owns that refresh. Cleanup
-// unlinks only older bucket paths, so a claimant that saw an expired bucket
-// cannot delete the live one. Lookup failures omit the name.
+// name. One exclusive lock file per time bucket owns that refresh. The
+// classification event only claims that lease. The detached worker later
+// unlinks older generations. Lookup failures omit the name.
 function readMacDeviceName(): string | undefined {
   try {
     if (macDeviceNameDeps.platform !== "darwin") return undefined;
@@ -835,6 +838,9 @@ async function refreshMacDeviceName(
 ): Promise<void> {
   try {
     if (!MAC_DEVICE_NAME_LOCK_OWNER.test(owner) || !validDeviceNameEpoch(epoch)) return;
+    // A worker that starts after its bucket rolled must still delete older
+    // generations. It must not publish a name or a failure for that bucket.
+    cleanupOlderDeviceNameGenerations(deps.homeDirectory, epoch);
     if (!deviceNameLeaseHeldBy(deps.homeDirectory, owner, epoch) || deviceNameEpoch(deps.now()) !== epoch) return;
     let usable: string | undefined;
     try {

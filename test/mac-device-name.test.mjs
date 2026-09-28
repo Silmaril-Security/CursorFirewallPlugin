@@ -10,6 +10,7 @@ import {
   flushMacDeviceNameRefreshForTests,
   refreshMacDeviceNameForTests,
   runCursorHook,
+  runMacDeviceNameRefreshForTests,
   setMacDeviceNameLookupForTests,
   withProvenance,
 } from "../dist/cursor-hook.js";
@@ -570,6 +571,134 @@ describe("macOS computer name provenance", { concurrency: 1 }, () => {
     assert.equal(JSON.parse(await readFile(generationFile(home, "cache", current), "utf8")).name, "Office Mac");
     assert.equal((await lstat(lockFile(home, now.value))).isFile(), true);
     assert.equal(withProvenance({}).silmaril.provenance.device_name, "Office Mac");
+  });
+
+  test("cold classification returns before stale generation cleanup", async () => {
+    const home = await tempHome();
+    const now = { value: 500_000 };
+    const current = Math.floor(now.value / 5_000);
+    const previous = current - 1;
+    const future = current + 3;
+    const stale = Math.floor((now.value - (5 * 60 * 1000) - 5_000) / 5_000);
+    const directory = path.join(home, "Library", "Application Support", "Silmaril");
+    await mkdir(directory, { recursive: true });
+    const record = (epoch, name) => JSON.stringify({
+      v: 1,
+      epoch,
+      name,
+      expiresAt: now.value + 60_000,
+    });
+    await writeFile(generationFile(home, "cache", stale), record(stale, "Ancient Mac"));
+    await writeFile(generationFile(home, "cache", previous), JSON.stringify({
+      v: 1,
+      epoch: previous,
+      name: "Recent Mac",
+      expiresAt: now.value - 1,
+    }));
+    await writeFile(generationFile(home, "cache", future), record(future, "Future Mac"));
+    await writeFile(generationFile(home, "lock", future), JSON.stringify({
+      v: 1,
+      owner: "c".repeat(32),
+      epoch: future,
+    }));
+    let scheduled = null;
+    setMacDeviceNameLookupForTests({
+      platform: "darwin",
+      homeDirectory: home,
+      now: () => now.value,
+      schedule: (owner, epoch) => {
+        scheduled = { owner, epoch };
+      },
+    });
+    const calls = [];
+    const output = await runCursorHook(
+      hookInput(),
+      BASE_ENV,
+      captureDependencies([{ prediction: "BENIGN" }], [], calls),
+    );
+    assert.equal(calls.some((call) => call.options), true);
+    assert.equal(output, undefined);
+    assert.equal(scheduled?.epoch, current);
+    assert.equal(JSON.parse(await readFile(generationFile(home, "cache", stale), "utf8")).name, "Ancient Mac");
+    assert.equal(JSON.parse(await readFile(generationFile(home, "cache", previous), "utf8")).name, "Recent Mac");
+    assert.equal(JSON.parse(await readFile(generationFile(home, "cache", future), "utf8")).name, "Future Mac");
+
+    setMacDeviceNameLookupForTests({
+      platform: "darwin",
+      homeDirectory: home,
+      now: () => now.value,
+      command: () => "Office Mac\n",
+    });
+    await runMacDeviceNameRefreshForTests(scheduled.owner, scheduled.epoch);
+
+    await assert.rejects(lstat(generationFile(home, "cache", stale)));
+    assert.equal(JSON.parse(await readFile(generationFile(home, "cache", previous), "utf8")).name, "Recent Mac");
+    assert.equal(JSON.parse(await readFile(generationFile(home, "cache", future), "utf8")).name, "Future Mac");
+    assert.equal((await lstat(generationFile(home, "lock", future))).isFile(), true);
+    assert.equal((await lstat(lockFile(home, now.value))).isFile(), true);
+    assert.equal(JSON.parse(await readFile(generationFile(home, "cache", current), "utf8")).name, "Office Mac");
+  });
+
+  test("a late refresh worker cleans stale generations without publishing", async () => {
+    const home = await tempHome();
+    const now = { value: 100_000 };
+    const claimed = Math.floor(now.value / 5_000);
+    const previous = claimed - 1;
+    const stale = claimed - 3;
+    const newer = claimed + 2;
+    const directory = path.join(home, "Library", "Application Support", "Silmaril");
+    await mkdir(directory, { recursive: true });
+    const record = (epoch, name) => JSON.stringify({
+      v: 1,
+      epoch,
+      name,
+      expiresAt: now.value + 60_000,
+    });
+    await writeFile(generationFile(home, "cache", stale), record(stale, "Ancient Mac"));
+    await writeFile(generationFile(home, "cache", previous), JSON.stringify({
+      v: 1,
+      epoch: previous,
+      name: "Recent Mac",
+      expiresAt: now.value - 1,
+    }));
+    await writeFile(generationFile(home, "cache", newer), record(newer, "Future Mac"));
+    await writeFile(generationFile(home, "lock", newer), JSON.stringify({
+      v: 1,
+      owner: "d".repeat(32),
+      epoch: newer,
+    }));
+    let scheduled = null;
+    setMacDeviceNameLookupForTests({
+      platform: "darwin",
+      homeDirectory: home,
+      now: () => now.value,
+      schedule: (owner, epoch) => {
+        scheduled = { owner, epoch };
+      },
+    });
+    assert.equal(withProvenance({}).silmaril.provenance.device_name, undefined);
+    assert.equal(scheduled?.epoch, claimed);
+    now.value += 5_000;
+    let calls = 0;
+    setMacDeviceNameLookupForTests({
+      platform: "darwin",
+      homeDirectory: home,
+      now: () => now.value,
+      command: () => {
+        calls += 1;
+        return "Should Not Publish\n";
+      },
+    });
+    await runMacDeviceNameRefreshForTests(scheduled.owner, scheduled.epoch);
+    assert.equal(calls, 0);
+    await assert.rejects(lstat(generationFile(home, "cache", stale)));
+    assert.equal(JSON.parse(await readFile(generationFile(home, "cache", previous), "utf8")).name, "Recent Mac");
+    assert.equal(JSON.parse(await readFile(generationFile(home, "cache", newer), "utf8")).name, "Future Mac");
+    assert.equal((await lstat(generationFile(home, "lock", newer))).isFile(), true);
+    assert.equal((await lstat(lockFile(home, 100_000))).isFile(), true);
+    const shared = JSON.parse(await readFile(cacheFile(home), "utf8"));
+    assert.equal(Object.hasOwn(shared, "name"), false);
+    assert.equal(JSON.parse(await readFile(generationFile(home, "cache", claimed), "utf8")).name, undefined);
   });
 });
 

@@ -1700,10 +1700,13 @@ function refreshMacDeviceNameForTests() {
   try {
     const lease = claimDeviceNameRefreshLease(macDeviceNameDeps.homeDirectory, macDeviceNameDeps.now());
     if (!lease) return Promise.resolve();
-    return refreshMacDeviceName(macDeviceNameGeneration, macDeviceNameDeps, lease.owner, lease.epoch);
+    return runMacDeviceNameRefreshForTests(lease.owner, lease.epoch);
   } catch {
     return Promise.resolve();
   }
+}
+function runMacDeviceNameRefreshForTests(owner, epoch) {
+  return refreshMacDeviceName(macDeviceNameGeneration, macDeviceNameDeps, owner, epoch);
 }
 function deviceNameStateDirectory(homeDirectory) {
   return path3.join(homeDirectory, "Library", "Application Support", "Silmaril");
@@ -1855,7 +1858,6 @@ function claimDeviceNameRefreshLease(homeDirectory, now) {
     const directoryStat = lstatSync(directory);
     if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) return void 0;
     chmodSync(directory, 448);
-    cleanupOlderDeviceNameGenerations(homeDirectory, epoch);
     const owner = randomBytes(16).toString("hex");
     const payload = JSON.stringify({ v: 1, owner, epoch });
     const created = createExclusiveDeviceNameLock(deviceNameLockPath(homeDirectory, epoch), payload);
@@ -2004,6 +2006,7 @@ function startMacDeviceNameRefresh(owner, epoch) {
 async function refreshMacDeviceName(generation, deps, owner, epoch) {
   try {
     if (!MAC_DEVICE_NAME_LOCK_OWNER.test(owner) || !validDeviceNameEpoch(epoch)) return;
+    cleanupOlderDeviceNameGenerations(deps.homeDirectory, epoch);
     if (!deviceNameLeaseHeldBy(deps.homeDirectory, owner, epoch) || deviceNameEpoch(deps.now()) !== epoch) return;
     let usable;
     try {
@@ -2237,6 +2240,7 @@ export {
   resolveLocalEventDirectory,
   resolveRuntimeConfig,
   runCursorHook,
+  runMacDeviceNameRefreshForTests,
   setMacDeviceNameLookupForTests,
   withProvenance,
   writeLocalProtectionEvent,
