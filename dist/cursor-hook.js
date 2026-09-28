@@ -1014,6 +1014,7 @@ init_exceptions();
 init_hooks();
 
 // src/cursor-hook.ts
+import { execFileSync } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -1418,6 +1419,13 @@ var PLUGIN_NAME = "cursor-firewall-plugin";
 var PLUGIN_VERSION = "0.2.4";
 var MAX_STDIN_BYTES = 4 * 1024 * 1024;
 var SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
+var MAC_DEVICE_NAME_TIMEOUT_MS = 100;
+var MAC_DEVICE_NAME_MAX_OUTPUT_BYTES = 1024;
+var MAC_DEVICE_NAME_MAX_UTF16_UNITS = 256;
+var MAC_DEVICE_NAME_CACHE_TTL_MS = 5 * 60 * 1e3;
+var MAC_DEVICE_NAME_FILE = "/usr/sbin/scutil";
+var MAC_DEVICE_NAME_ARGS = ["--get", "ComputerName"];
+var MAC_DEVICE_NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F]/;
 var DEFAULT_DEPENDENCIES = {
   firewallConstructor: Firewall,
   evidenceEmitter: writeLocalProtectionEvent
@@ -1586,8 +1594,83 @@ function classifyOptions(target, endpointId2) {
     requestId: target.requestId
   };
 }
+function defaultMacDeviceNameCommand(invocation) {
+  try {
+    const output = execFileSync(invocation.file, [...invocation.args], {
+      timeout: invocation.timeoutMs,
+      maxBuffer: invocation.maxBuffer,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    if (typeof output !== "string") {
+      throw new Error("mac device name lookup failed");
+    }
+    return output;
+  } catch (error) {
+    if (error instanceof Error && error.message === "mac device name lookup failed") {
+      throw error;
+    }
+    throw new Error("mac device name lookup failed");
+  }
+}
+function normalizeMacDeviceName(output, maxOutputBytes) {
+  if (Buffer.byteLength(output, "utf8") > maxOutputBytes) {
+    return void 0;
+  }
+  const name = output.trim();
+  if (!name || name.length > MAC_DEVICE_NAME_MAX_UTF16_UNITS || MAC_DEVICE_NAME_CONTROL_CHARS.test(name)) {
+    return void 0;
+  }
+  return name;
+}
+var defaultMacDeviceNameDeps = {
+  platform: process.platform,
+  now: () => performance.now(),
+  command: defaultMacDeviceNameCommand
+};
+var macDeviceNameDeps = {
+  platform: defaultMacDeviceNameDeps.platform,
+  now: defaultMacDeviceNameDeps.now,
+  command: defaultMacDeviceNameDeps.command
+};
+var macDeviceNameCache;
+function setMacDeviceNameLookupForTests(overrides = {}) {
+  macDeviceNameDeps = {
+    platform: overrides.platform ?? process.platform,
+    now: overrides.now ?? (() => performance.now()),
+    command: overrides.command ?? defaultMacDeviceNameCommand
+  };
+  macDeviceNameCache = void 0;
+}
+function readMacDeviceName() {
+  if (macDeviceNameDeps.platform !== "darwin") {
+    return void 0;
+  }
+  const now = macDeviceNameDeps.now();
+  if (macDeviceNameCache && now < macDeviceNameCache.expiresAt) {
+    return macDeviceNameCache.value;
+  }
+  let value;
+  try {
+    const output = macDeviceNameDeps.command({
+      file: MAC_DEVICE_NAME_FILE,
+      args: MAC_DEVICE_NAME_ARGS,
+      timeoutMs: MAC_DEVICE_NAME_TIMEOUT_MS,
+      maxBuffer: MAC_DEVICE_NAME_MAX_OUTPUT_BYTES
+    });
+    value = normalizeMacDeviceName(output, MAC_DEVICE_NAME_MAX_OUTPUT_BYTES);
+  } catch {
+    value = void 0;
+  }
+  macDeviceNameCache = {
+    value,
+    expiresAt: now + MAC_DEVICE_NAME_CACHE_TTL_MS
+  };
+  return value;
+}
 function withProvenance(metadata, endpointId2, governance) {
   const existingSilmaril = metadata.silmaril && typeof metadata.silmaril === "object" && !Array.isArray(metadata.silmaril) ? metadata.silmaril : {};
+  const deviceName = readMacDeviceName();
   return {
     ...metadata,
     silmaril: {
@@ -1595,7 +1678,8 @@ function withProvenance(metadata, endpointId2, governance) {
       provenance: {
         schema_version: 1,
         ...endpointId2 ? { endpoint_id: endpointId2 } : {},
-        harness: "cursor"
+        harness: "cursor",
+        ...deviceName ? { device_name: deviceName } : {}
       },
       ...governance ? { governance } : {}
     }
@@ -1758,6 +1842,7 @@ export {
   resolveLocalEventDirectory,
   resolveRuntimeConfig,
   runCursorHook,
+  setMacDeviceNameLookupForTests,
   withProvenance,
   writeLocalProtectionEvent,
   writeOutputDecision

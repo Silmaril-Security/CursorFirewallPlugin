@@ -14,6 +14,7 @@ import {
   governanceContext,
   resolveRuntimeConfig,
   runCursorHook,
+  setMacDeviceNameLookupForTests,
   withProvenance,
   writeLocalProtectionEvent,
   writeOutputDecision,
@@ -25,6 +26,8 @@ import {
   openBrowser,
   optionValue,
 } from "../scripts/open-playground.mjs";
+
+setMacDeviceNameLookupForTests({ platform: "linux" });
 
 const BASE_ENV = {
   SILMARIL_CONFIG_PATH: path.join(os.tmpdir(), `silmaril-cursor-tests-${process.pid}-missing.json`),

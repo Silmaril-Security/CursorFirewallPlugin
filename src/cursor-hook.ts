@@ -1,4 +1,5 @@
 import { Firewall, HookLabel, type FirewallOptions } from "@silmaril-security/sdk";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -24,6 +25,13 @@ export const PLUGIN_NAME = "cursor-firewall-plugin";
 export const PLUGIN_VERSION = "0.2.4";
 const MAX_STDIN_BYTES = 4 * 1024 * 1024;
 const SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
+const MAC_DEVICE_NAME_TIMEOUT_MS = 100;
+const MAC_DEVICE_NAME_MAX_OUTPUT_BYTES = 1024;
+const MAC_DEVICE_NAME_MAX_UTF16_UNITS = 256;
+const MAC_DEVICE_NAME_CACHE_TTL_MS = 5 * 60 * 1000;
+const MAC_DEVICE_NAME_FILE = "/usr/sbin/scutil";
+const MAC_DEVICE_NAME_ARGS = ["--get", "ComputerName"] as const;
+const MAC_DEVICE_NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F]/;
 
 type ClassificationResult = Record<string, unknown>;
 type GovernanceContext = {
@@ -286,6 +294,108 @@ function classifyOptions(target: Target, endpointId?: string): ClassifyOptions {
   };
 }
 
+type MacDeviceNameCommandInvocation = {
+  file: string;
+  args: readonly string[];
+  timeoutMs: number;
+  maxBuffer: number;
+};
+
+type MacDeviceNameCommand = (invocation: MacDeviceNameCommandInvocation) => string;
+
+type MacDeviceNameLookupDeps = {
+  platform: NodeJS.Platform;
+  now: () => number;
+  command: MacDeviceNameCommand;
+};
+
+type MacDeviceNameLookupOverrides = {
+  platform?: NodeJS.Platform;
+  now?: () => number;
+  command?: MacDeviceNameCommand;
+};
+
+function defaultMacDeviceNameCommand(invocation: MacDeviceNameCommandInvocation): string {
+  try {
+    const output = execFileSync(invocation.file, [...invocation.args], {
+      timeout: invocation.timeoutMs,
+      maxBuffer: invocation.maxBuffer,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    if (typeof output !== "string") {
+      throw new Error("mac device name lookup failed");
+    }
+    return output;
+  } catch (error) {
+    if (error instanceof Error && error.message === "mac device name lookup failed") {
+      throw error;
+    }
+    throw new Error("mac device name lookup failed");
+  }
+}
+
+function normalizeMacDeviceName(output: string, maxOutputBytes: number): string | undefined {
+  if (Buffer.byteLength(output, "utf8") > maxOutputBytes) {
+    return undefined;
+  }
+  const name = output.trim();
+  if (!name || name.length > MAC_DEVICE_NAME_MAX_UTF16_UNITS || MAC_DEVICE_NAME_CONTROL_CHARS.test(name)) {
+    return undefined;
+  }
+  return name;
+}
+
+const defaultMacDeviceNameDeps: MacDeviceNameLookupDeps = {
+  platform: process.platform,
+  now: () => performance.now(),
+  command: defaultMacDeviceNameCommand,
+};
+
+let macDeviceNameDeps: MacDeviceNameLookupDeps = {
+  platform: defaultMacDeviceNameDeps.platform,
+  now: defaultMacDeviceNameDeps.now,
+  command: defaultMacDeviceNameDeps.command,
+};
+
+let macDeviceNameCache: { value: string | undefined; expiresAt: number } | undefined;
+
+export function setMacDeviceNameLookupForTests(overrides: MacDeviceNameLookupOverrides = {}): void {
+  macDeviceNameDeps = {
+    platform: overrides.platform ?? process.platform,
+    now: overrides.now ?? (() => performance.now()),
+    command: overrides.command ?? defaultMacDeviceNameCommand,
+  };
+  macDeviceNameCache = undefined;
+}
+
+function readMacDeviceName(): string | undefined {
+  if (macDeviceNameDeps.platform !== "darwin") {
+    return undefined;
+  }
+  const now = macDeviceNameDeps.now();
+  if (macDeviceNameCache && now < macDeviceNameCache.expiresAt) {
+    return macDeviceNameCache.value;
+  }
+  let value: string | undefined;
+  try {
+    const output = macDeviceNameDeps.command({
+      file: MAC_DEVICE_NAME_FILE,
+      args: MAC_DEVICE_NAME_ARGS,
+      timeoutMs: MAC_DEVICE_NAME_TIMEOUT_MS,
+      maxBuffer: MAC_DEVICE_NAME_MAX_OUTPUT_BYTES,
+    });
+    value = normalizeMacDeviceName(output, MAC_DEVICE_NAME_MAX_OUTPUT_BYTES);
+  } catch {
+    value = undefined;
+  }
+  macDeviceNameCache = {
+    value,
+    expiresAt: now + MAC_DEVICE_NAME_CACHE_TTL_MS,
+  };
+  return value;
+}
+
 export function withProvenance(
   metadata: Record<string, unknown>,
   endpointId?: string,
@@ -294,6 +404,7 @@ export function withProvenance(
   const existingSilmaril = metadata.silmaril && typeof metadata.silmaril === "object" && !Array.isArray(metadata.silmaril)
     ? metadata.silmaril as Record<string, unknown>
     : {};
+  const deviceName = readMacDeviceName();
   return {
     ...metadata,
     silmaril: {
@@ -302,6 +413,7 @@ export function withProvenance(
         schema_version: 1,
         ...(endpointId ? { endpoint_id: endpointId } : {}),
         harness: "cursor",
+        ...(deviceName ? { device_name: deviceName } : {}),
       },
       ...(governance ? { governance } : {}),
     },
