@@ -1,7 +1,22 @@
 import { Firewall, HookLabel, type FirewallOptions } from "@silmaril-security/sdk";
-import { execFileSync } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   resolveRuntimeConfig,
@@ -29,9 +44,12 @@ const MAC_DEVICE_NAME_TIMEOUT_MS = 100;
 const MAC_DEVICE_NAME_MAX_OUTPUT_BYTES = 1024;
 const MAC_DEVICE_NAME_MAX_UTF16_UNITS = 256;
 const MAC_DEVICE_NAME_CACHE_TTL_MS = 5 * 60 * 1000;
+const MAC_DEVICE_NAME_FAILURE_RETRY_MS = 5 * 1000;
+const MAC_DEVICE_NAME_CACHE_MAX_BYTES = 4096;
+const MAC_DEVICE_NAME_REFRESH_ARG = "--silmaril-refresh-device-name";
 const MAC_DEVICE_NAME_FILE = "/usr/sbin/scutil";
 const MAC_DEVICE_NAME_ARGS = ["--get", "ComputerName"] as const;
-const MAC_DEVICE_NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F]/;
+const MAC_DEVICE_NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/;
 
 type ClassificationResult = Record<string, unknown>;
 type GovernanceContext = {
@@ -301,38 +319,61 @@ type MacDeviceNameCommandInvocation = {
   maxBuffer: number;
 };
 
-type MacDeviceNameCommand = (invocation: MacDeviceNameCommandInvocation) => string;
+type MacDeviceNameCommand = (
+  invocation: MacDeviceNameCommandInvocation,
+) => string | Promise<string>;
 
 type MacDeviceNameLookupDeps = {
   platform: NodeJS.Platform;
   now: () => number;
   command: MacDeviceNameCommand;
+  homeDirectory: string;
+  schedule: () => void;
 };
 
 type MacDeviceNameLookupOverrides = {
   platform?: NodeJS.Platform;
   now?: () => number;
   command?: MacDeviceNameCommand;
+  homeDirectory?: string;
+  schedule?: () => void;
 };
 
-function defaultMacDeviceNameCommand(invocation: MacDeviceNameCommandInvocation): string {
-  try {
-    const output = execFileSync(invocation.file, [...invocation.args], {
+type DeviceNameCacheRecord = {
+  v: 1;
+  name?: string;
+  expiresAt?: number;
+  retryAt?: number;
+};
+
+type DeviceNameMemory =
+  | { kind: "name"; value: string; expiresAt: number }
+  | { kind: "retry"; retryAt: number };
+
+function defaultMacDeviceNameCommand(invocation: MacDeviceNameCommandInvocation): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(invocation.file, [...invocation.args], {
       timeout: invocation.timeoutMs,
       maxBuffer: invocation.maxBuffer,
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    }, (error, stdout) => {
+      if (error || typeof stdout !== "string") {
+        reject(new Error("mac device name lookup failed"));
+        return;
+      }
+      resolve(stdout);
     });
-    if (typeof output !== "string") {
-      throw new Error("mac device name lookup failed");
-    }
-    return output;
-  } catch (error) {
-    if (error instanceof Error && error.message === "mac device name lookup failed") {
-      throw error;
-    }
-    throw new Error("mac device name lookup failed");
-  }
+  });
+}
+
+function defaultScheduleMacDeviceNameRefresh(): void {
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), MAC_DEVICE_NAME_REFRESH_ARG], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref();
 }
 
 function normalizeMacDeviceName(output: string, maxOutputBytes: number): string | undefined {
@@ -348,52 +389,190 @@ function normalizeMacDeviceName(output: string, maxOutputBytes: number): string 
 
 const defaultMacDeviceNameDeps: MacDeviceNameLookupDeps = {
   platform: process.platform,
-  now: () => performance.now(),
+  now: () => Date.now(),
   command: defaultMacDeviceNameCommand,
+  homeDirectory: homedir(),
+  schedule: defaultScheduleMacDeviceNameRefresh,
 };
 
-let macDeviceNameDeps: MacDeviceNameLookupDeps = {
-  platform: defaultMacDeviceNameDeps.platform,
-  now: defaultMacDeviceNameDeps.now,
-  command: defaultMacDeviceNameDeps.command,
-};
-
-let macDeviceNameCache: { value: string | undefined; expiresAt: number } | undefined;
+let macDeviceNameDeps: MacDeviceNameLookupDeps = { ...defaultMacDeviceNameDeps };
+let macDeviceNameMemory: DeviceNameMemory | undefined;
+let macDeviceNameRefresh: Promise<void> | undefined;
+let macDeviceNameGeneration = 0;
 
 export function setMacDeviceNameLookupForTests(overrides: MacDeviceNameLookupOverrides = {}): void {
+  macDeviceNameGeneration += 1;
   macDeviceNameDeps = {
     platform: overrides.platform ?? process.platform,
-    now: overrides.now ?? (() => performance.now()),
+    now: overrides.now ?? Date.now,
     command: overrides.command ?? defaultMacDeviceNameCommand,
+    homeDirectory: overrides.homeDirectory ?? homedir(),
+    schedule: overrides.schedule ?? defaultScheduleMacDeviceNameRefresh,
   };
-  macDeviceNameCache = undefined;
+  macDeviceNameMemory = undefined;
+  macDeviceNameRefresh = undefined;
 }
 
-function readMacDeviceName(): string | undefined {
-  if (macDeviceNameDeps.platform !== "darwin") {
-    return undefined;
+export function flushMacDeviceNameRefreshForTests(): Promise<void> {
+  return macDeviceNameRefresh ?? Promise.resolve();
+}
+
+function deviceNameCachePath(homeDirectory: string): string {
+  return path.join(homeDirectory, "Library", "Application Support", "Silmaril", "cursor-device-name.json");
+}
+
+function loadDeviceNameCache(now: number): { name?: string; expiresAt?: number; retryAt?: number } {
+  const record = readDeviceNameCacheRecord(macDeviceNameDeps.homeDirectory);
+  if (!record || record.v !== 1) return {};
+  const expiresAt = typeof record.expiresAt === "number" && Number.isFinite(record.expiresAt)
+    ? record.expiresAt
+    : undefined;
+  const retryAt = typeof record.retryAt === "number" && Number.isFinite(record.retryAt)
+    ? record.retryAt
+    : undefined;
+  const name = typeof record.name === "string"
+    ? normalizeMacDeviceName(record.name, MAC_DEVICE_NAME_MAX_OUTPUT_BYTES)
+    : undefined;
+  if (
+    name
+    && expiresAt !== undefined
+    && now < expiresAt
+    && expiresAt - now <= MAC_DEVICE_NAME_CACHE_TTL_MS
+  ) {
+    return { name, expiresAt };
   }
-  const now = macDeviceNameDeps.now();
-  if (macDeviceNameCache && now < macDeviceNameCache.expiresAt) {
-    return macDeviceNameCache.value;
+  if (
+    retryAt !== undefined
+    && now < retryAt
+    && retryAt - now <= MAC_DEVICE_NAME_FAILURE_RETRY_MS
+  ) {
+    return { retryAt };
   }
-  let value: string | undefined;
+  return {};
+}
+
+function readDeviceNameCacheRecord(homeDirectory: string): DeviceNameCacheRecord | undefined {
+  const file = deviceNameCachePath(homeDirectory);
+  let fd: number | undefined;
   try {
-    const output = macDeviceNameDeps.command({
+    const linked = lstatSync(file);
+    if (!linked.isFile() || linked.isSymbolicLink() || linked.size === 0 || linked.size > MAC_DEVICE_NAME_CACHE_MAX_BYTES) {
+      return undefined;
+    }
+    fd = openSync(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size === 0 || stat.size > MAC_DEVICE_NAME_CACHE_MAX_BYTES) return undefined;
+    const buffer = Buffer.alloc(stat.size);
+    const bytesRead = readSync(fd, buffer, 0, stat.size, 0);
+    const parsed = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    return parsed as DeviceNameCacheRecord;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function writeDeviceNameCache(homeDirectory: string, record: DeviceNameCacheRecord): void {
+  const destination = deviceNameCachePath(homeDirectory);
+  const directory = path.dirname(destination);
+  const temporary = path.join(directory, `.${path.basename(destination)}.${process.pid}.tmp`);
+  try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const directoryStat = lstatSync(directory);
+    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) return;
+    chmodSync(directory, 0o700);
+    const payload = JSON.stringify(record);
+    if (Buffer.byteLength(payload) > MAC_DEVICE_NAME_CACHE_MAX_BYTES) return;
+    writeFileSync(temporary, payload, { mode: 0o600, flag: "w" });
+    chmodSync(temporary, 0o600);
+    try {
+      if (lstatSync(destination).isSymbolicLink()) unlinkSync(destination);
+    } catch {
+      // The cache file is absent.
+    }
+    renameSync(temporary, destination);
+    chmodSync(destination, 0o600);
+  } catch {
+    try {
+      unlinkSync(temporary);
+    } catch {
+      // The temporary file was not created.
+    }
+  }
+}
+
+// Each Cursor event is a new process. A fresh per-user file supplies the last
+// validated name without waiting on scutil. A cold or expired cache omits the
+// name and refreshes out of band. Failures leave only a short retry lease.
+function readMacDeviceName(): string | undefined {
+  if (macDeviceNameDeps.platform !== "darwin") return undefined;
+  const now = macDeviceNameDeps.now();
+  const stored = loadDeviceNameCache(now);
+  if (stored.name && stored.expiresAt !== undefined) {
+    macDeviceNameMemory = { kind: "name", value: stored.name, expiresAt: stored.expiresAt };
+    return stored.name;
+  }
+  if (macDeviceNameMemory?.kind === "name" && now < macDeviceNameMemory.expiresAt) {
+    return macDeviceNameMemory.value;
+  }
+  const retryAt = stored.retryAt
+    ?? (macDeviceNameMemory?.kind === "retry" ? macDeviceNameMemory.retryAt : undefined);
+  if ((retryAt !== undefined && now < retryAt) || macDeviceNameRefresh) return undefined;
+  const lease = now + MAC_DEVICE_NAME_FAILURE_RETRY_MS;
+  macDeviceNameMemory = { kind: "retry", retryAt: lease };
+  writeDeviceNameCache(macDeviceNameDeps.homeDirectory, { v: 1, retryAt: lease });
+  startMacDeviceNameRefresh();
+  return undefined;
+}
+
+function startMacDeviceNameRefresh(): void {
+  if (macDeviceNameRefresh) return;
+  if (macDeviceNameDeps.command !== defaultMacDeviceNameCommand) {
+    const generation = macDeviceNameGeneration;
+    const deps = macDeviceNameDeps;
+    macDeviceNameRefresh = refreshMacDeviceName(generation, deps).finally(() => {
+      if (generation === macDeviceNameGeneration) macDeviceNameRefresh = undefined;
+    });
+    return;
+  }
+  try {
+    macDeviceNameDeps.schedule();
+  } catch {
+    // Scheduling a refresh must not delay classification.
+  }
+}
+
+async function refreshMacDeviceName(
+  generation: number,
+  deps: MacDeviceNameLookupDeps,
+): Promise<void> {
+  let usable: string | undefined;
+  try {
+    const output = await deps.command({
       file: MAC_DEVICE_NAME_FILE,
       args: MAC_DEVICE_NAME_ARGS,
       timeoutMs: MAC_DEVICE_NAME_TIMEOUT_MS,
       maxBuffer: MAC_DEVICE_NAME_MAX_OUTPUT_BYTES,
     });
-    value = normalizeMacDeviceName(output, MAC_DEVICE_NAME_MAX_OUTPUT_BYTES);
+    usable = typeof output === "string"
+      ? normalizeMacDeviceName(output, MAC_DEVICE_NAME_MAX_OUTPUT_BYTES)
+      : undefined;
   } catch {
-    value = undefined;
+    usable = undefined;
   }
-  macDeviceNameCache = {
-    value,
-    expiresAt: now + MAC_DEVICE_NAME_CACHE_TTL_MS,
-  };
-  return value;
+  if (generation !== macDeviceNameGeneration) return;
+  const finished = deps.now();
+  if (usable) {
+    const expiresAt = finished + MAC_DEVICE_NAME_CACHE_TTL_MS;
+    macDeviceNameMemory = { kind: "name", value: usable, expiresAt };
+    writeDeviceNameCache(deps.homeDirectory, { v: 1, name: usable, expiresAt });
+    return;
+  }
+  const retryAt = finished + MAC_DEVICE_NAME_FAILURE_RETRY_MS;
+  macDeviceNameMemory = { kind: "retry", retryAt };
+  writeDeviceNameCache(deps.homeDirectory, { v: 1, retryAt });
 }
 
 export function withProvenance(
@@ -605,4 +784,10 @@ function isMainModule(): boolean {
   }
 }
 
-if (isMainModule()) await main();
+if (isMainModule()) {
+  if (process.argv.includes(MAC_DEVICE_NAME_REFRESH_ARG)) {
+    await refreshMacDeviceName(macDeviceNameGeneration, macDeviceNameDeps);
+  } else {
+    await main();
+  }
+}

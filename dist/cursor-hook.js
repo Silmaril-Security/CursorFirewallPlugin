@@ -1014,9 +1014,24 @@ init_exceptions();
 init_hooks();
 
 // src/cursor-hook.ts
-import { execFileSync } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { realpathSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync as closeSync2,
+  constants as fsConstants,
+  fstatSync as fstatSync2,
+  lstatSync,
+  mkdirSync,
+  openSync as openSync2,
+  readSync,
+  realpathSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync
+} from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import path3 from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/runtime-config.ts
@@ -1065,10 +1080,10 @@ function resolveRuntimeConfig(env = process.env) {
 function configurationPath(env = process.env) {
   return nonEmpty(env.SILMARIL_CONFIG_PATH) ?? join(homedir(), ".cursor", "silmaril-firewall.json");
 }
-function readFileConfig(path3) {
+function readFileConfig(path4) {
   let descriptor;
   try {
-    descriptor = openSync(path3, constants.O_RDONLY | constants.O_NOFOLLOW);
+    descriptor = openSync(path4, constants.O_RDONLY | constants.O_NOFOLLOW);
     const metadata = fstatSync(descriptor);
     if (!metadata.isFile() || metadata.size > MAX_CONFIG_BYTES || (metadata.mode & 63) !== 0) {
       return { state: "invalid" };
@@ -1423,9 +1438,12 @@ var MAC_DEVICE_NAME_TIMEOUT_MS = 100;
 var MAC_DEVICE_NAME_MAX_OUTPUT_BYTES = 1024;
 var MAC_DEVICE_NAME_MAX_UTF16_UNITS = 256;
 var MAC_DEVICE_NAME_CACHE_TTL_MS = 5 * 60 * 1e3;
+var MAC_DEVICE_NAME_FAILURE_RETRY_MS = 5 * 1e3;
+var MAC_DEVICE_NAME_CACHE_MAX_BYTES = 4096;
+var MAC_DEVICE_NAME_REFRESH_ARG = "--silmaril-refresh-device-name";
 var MAC_DEVICE_NAME_FILE = "/usr/sbin/scutil";
 var MAC_DEVICE_NAME_ARGS = ["--get", "ComputerName"];
-var MAC_DEVICE_NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F]/;
+var MAC_DEVICE_NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/;
 var DEFAULT_DEPENDENCIES = {
   firewallConstructor: Firewall,
   evidenceEmitter: writeLocalProtectionEvent
@@ -1595,23 +1613,28 @@ function classifyOptions(target, endpointId2) {
   };
 }
 function defaultMacDeviceNameCommand(invocation) {
-  try {
-    const output = execFileSync(invocation.file, [...invocation.args], {
+  return new Promise((resolve, reject) => {
+    execFile(invocation.file, [...invocation.args], {
       timeout: invocation.timeoutMs,
       maxBuffer: invocation.maxBuffer,
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
+      windowsHide: true
+    }, (error, stdout) => {
+      if (error || typeof stdout !== "string") {
+        reject(new Error("mac device name lookup failed"));
+        return;
+      }
+      resolve(stdout);
     });
-    if (typeof output !== "string") {
-      throw new Error("mac device name lookup failed");
-    }
-    return output;
-  } catch (error) {
-    if (error instanceof Error && error.message === "mac device name lookup failed") {
-      throw error;
-    }
-    throw new Error("mac device name lookup failed");
-  }
+  });
+}
+function defaultScheduleMacDeviceNameRefresh() {
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), MAC_DEVICE_NAME_REFRESH_ARG], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true
+  });
+  child.unref();
 }
 function normalizeMacDeviceName(output, maxOutputBytes) {
   if (Buffer.byteLength(output, "utf8") > maxOutputBytes) {
@@ -1625,48 +1648,153 @@ function normalizeMacDeviceName(output, maxOutputBytes) {
 }
 var defaultMacDeviceNameDeps = {
   platform: process.platform,
-  now: () => performance.now(),
-  command: defaultMacDeviceNameCommand
+  now: () => Date.now(),
+  command: defaultMacDeviceNameCommand,
+  homeDirectory: homedir4(),
+  schedule: defaultScheduleMacDeviceNameRefresh
 };
-var macDeviceNameDeps = {
-  platform: defaultMacDeviceNameDeps.platform,
-  now: defaultMacDeviceNameDeps.now,
-  command: defaultMacDeviceNameDeps.command
-};
-var macDeviceNameCache;
+var macDeviceNameDeps = { ...defaultMacDeviceNameDeps };
+var macDeviceNameMemory;
+var macDeviceNameRefresh;
+var macDeviceNameGeneration = 0;
 function setMacDeviceNameLookupForTests(overrides = {}) {
+  macDeviceNameGeneration += 1;
   macDeviceNameDeps = {
     platform: overrides.platform ?? process.platform,
-    now: overrides.now ?? (() => performance.now()),
-    command: overrides.command ?? defaultMacDeviceNameCommand
+    now: overrides.now ?? Date.now,
+    command: overrides.command ?? defaultMacDeviceNameCommand,
+    homeDirectory: overrides.homeDirectory ?? homedir4(),
+    schedule: overrides.schedule ?? defaultScheduleMacDeviceNameRefresh
   };
-  macDeviceNameCache = void 0;
+  macDeviceNameMemory = void 0;
+  macDeviceNameRefresh = void 0;
+}
+function flushMacDeviceNameRefreshForTests() {
+  return macDeviceNameRefresh ?? Promise.resolve();
+}
+function deviceNameCachePath(homeDirectory) {
+  return path3.join(homeDirectory, "Library", "Application Support", "Silmaril", "cursor-device-name.json");
+}
+function loadDeviceNameCache(now) {
+  const record = readDeviceNameCacheRecord(macDeviceNameDeps.homeDirectory);
+  if (!record || record.v !== 1) return {};
+  const expiresAt = typeof record.expiresAt === "number" && Number.isFinite(record.expiresAt) ? record.expiresAt : void 0;
+  const retryAt = typeof record.retryAt === "number" && Number.isFinite(record.retryAt) ? record.retryAt : void 0;
+  const name = typeof record.name === "string" ? normalizeMacDeviceName(record.name, MAC_DEVICE_NAME_MAX_OUTPUT_BYTES) : void 0;
+  if (name && expiresAt !== void 0 && now < expiresAt && expiresAt - now <= MAC_DEVICE_NAME_CACHE_TTL_MS) {
+    return { name, expiresAt };
+  }
+  if (retryAt !== void 0 && now < retryAt && retryAt - now <= MAC_DEVICE_NAME_FAILURE_RETRY_MS) {
+    return { retryAt };
+  }
+  return {};
+}
+function readDeviceNameCacheRecord(homeDirectory) {
+  const file = deviceNameCachePath(homeDirectory);
+  let fd;
+  try {
+    const linked = lstatSync(file);
+    if (!linked.isFile() || linked.isSymbolicLink() || linked.size === 0 || linked.size > MAC_DEVICE_NAME_CACHE_MAX_BYTES) {
+      return void 0;
+    }
+    fd = openSync2(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const stat = fstatSync2(fd);
+    if (!stat.isFile() || stat.size === 0 || stat.size > MAC_DEVICE_NAME_CACHE_MAX_BYTES) return void 0;
+    const buffer = Buffer.alloc(stat.size);
+    const bytesRead = readSync(fd, buffer, 0, stat.size, 0);
+    const parsed = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
+    return parsed;
+  } catch {
+    return void 0;
+  } finally {
+    if (fd !== void 0) closeSync2(fd);
+  }
+}
+function writeDeviceNameCache(homeDirectory, record) {
+  const destination = deviceNameCachePath(homeDirectory);
+  const directory = path3.dirname(destination);
+  const temporary = path3.join(directory, `.${path3.basename(destination)}.${process.pid}.tmp`);
+  try {
+    mkdirSync(directory, { recursive: true, mode: 448 });
+    const directoryStat = lstatSync(directory);
+    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) return;
+    chmodSync(directory, 448);
+    const payload = JSON.stringify(record);
+    if (Buffer.byteLength(payload) > MAC_DEVICE_NAME_CACHE_MAX_BYTES) return;
+    writeFileSync(temporary, payload, { mode: 384, flag: "w" });
+    chmodSync(temporary, 384);
+    try {
+      if (lstatSync(destination).isSymbolicLink()) unlinkSync(destination);
+    } catch {
+    }
+    renameSync(temporary, destination);
+    chmodSync(destination, 384);
+  } catch {
+    try {
+      unlinkSync(temporary);
+    } catch {
+    }
+  }
 }
 function readMacDeviceName() {
-  if (macDeviceNameDeps.platform !== "darwin") {
-    return void 0;
-  }
+  if (macDeviceNameDeps.platform !== "darwin") return void 0;
   const now = macDeviceNameDeps.now();
-  if (macDeviceNameCache && now < macDeviceNameCache.expiresAt) {
-    return macDeviceNameCache.value;
+  const stored = loadDeviceNameCache(now);
+  if (stored.name && stored.expiresAt !== void 0) {
+    macDeviceNameMemory = { kind: "name", value: stored.name, expiresAt: stored.expiresAt };
+    return stored.name;
   }
-  let value;
+  if (macDeviceNameMemory?.kind === "name" && now < macDeviceNameMemory.expiresAt) {
+    return macDeviceNameMemory.value;
+  }
+  const retryAt = stored.retryAt ?? (macDeviceNameMemory?.kind === "retry" ? macDeviceNameMemory.retryAt : void 0);
+  if (retryAt !== void 0 && now < retryAt || macDeviceNameRefresh) return void 0;
+  const lease = now + MAC_DEVICE_NAME_FAILURE_RETRY_MS;
+  macDeviceNameMemory = { kind: "retry", retryAt: lease };
+  writeDeviceNameCache(macDeviceNameDeps.homeDirectory, { v: 1, retryAt: lease });
+  startMacDeviceNameRefresh();
+  return void 0;
+}
+function startMacDeviceNameRefresh() {
+  if (macDeviceNameRefresh) return;
+  if (macDeviceNameDeps.command !== defaultMacDeviceNameCommand) {
+    const generation = macDeviceNameGeneration;
+    const deps = macDeviceNameDeps;
+    macDeviceNameRefresh = refreshMacDeviceName(generation, deps).finally(() => {
+      if (generation === macDeviceNameGeneration) macDeviceNameRefresh = void 0;
+    });
+    return;
+  }
   try {
-    const output = macDeviceNameDeps.command({
+    macDeviceNameDeps.schedule();
+  } catch {
+  }
+}
+async function refreshMacDeviceName(generation, deps) {
+  let usable;
+  try {
+    const output = await deps.command({
       file: MAC_DEVICE_NAME_FILE,
       args: MAC_DEVICE_NAME_ARGS,
       timeoutMs: MAC_DEVICE_NAME_TIMEOUT_MS,
       maxBuffer: MAC_DEVICE_NAME_MAX_OUTPUT_BYTES
     });
-    value = normalizeMacDeviceName(output, MAC_DEVICE_NAME_MAX_OUTPUT_BYTES);
+    usable = typeof output === "string" ? normalizeMacDeviceName(output, MAC_DEVICE_NAME_MAX_OUTPUT_BYTES) : void 0;
   } catch {
-    value = void 0;
+    usable = void 0;
   }
-  macDeviceNameCache = {
-    value,
-    expiresAt: now + MAC_DEVICE_NAME_CACHE_TTL_MS
-  };
-  return value;
+  if (generation !== macDeviceNameGeneration) return;
+  const finished = deps.now();
+  if (usable) {
+    const expiresAt = finished + MAC_DEVICE_NAME_CACHE_TTL_MS;
+    macDeviceNameMemory = { kind: "name", value: usable, expiresAt };
+    writeDeviceNameCache(deps.homeDirectory, { v: 1, name: usable, expiresAt });
+    return;
+  }
+  const retryAt = finished + MAC_DEVICE_NAME_FAILURE_RETRY_MS;
+  macDeviceNameMemory = { kind: "retry", retryAt };
+  writeDeviceNameCache(deps.homeDirectory, { v: 1, retryAt });
 }
 function withProvenance(metadata, endpointId2, governance) {
   const existingSilmaril = metadata.silmaril && typeof metadata.silmaril === "object" && !Array.isArray(metadata.silmaril) ? metadata.silmaril : {};
@@ -1829,7 +1957,13 @@ function isMainModule() {
     return false;
   }
 }
-if (isMainModule()) await main();
+if (isMainModule()) {
+  if (process.argv.includes(MAC_DEVICE_NAME_REFRESH_ARG)) {
+    await refreshMacDeviceName(macDeviceNameGeneration, macDeviceNameDeps);
+  } else {
+    await main();
+  }
+}
 export {
   PLUGIN_NAME,
   PLUGIN_VERSION,
@@ -1838,6 +1972,7 @@ export {
   configurationPath,
   consumeOutputDecision,
   effectiveMode,
+  flushMacDeviceNameRefreshForTests,
   governanceContext,
   resolveLocalEventDirectory,
   resolveRuntimeConfig,
