@@ -53,7 +53,7 @@ export SILMARIL_ENABLED="true"
 
 `SILMARIL_TIMEOUT_MS` accepts `250` through `10000`. Missing or insecure configuration, malformed hook input, invalid classifier responses, SDK failures, network errors, and timeouts fail open. `SILMARIL_DEBUG=true` writes metadata-only diagnostics to stderr; raw classified content is never logged.
 
-Every classifier request carries plugin-owned `metadata.silmaril.provenance`. If the app-provided canonical UUID v4 is absent, the plugin continues with harness-only provenance.
+Every classifier request carries plugin-owned `metadata.silmaril.provenance`. If the app-provided canonical UUID v4 is absent, the plugin continues with harness-only provenance. A nonempty `model_id` is copied to `metadata.silmaril.agent_model_id`. When `model_id` is absent or blank, a nonempty legacy `model` slug is used instead. `model_params` and `cursor_version` are not the selected model, and the field does not change fail-open behavior or native enforcement.
 
 Set `SILMARIL_LOCAL_EVENT_DIR` only when the default private evidence spool must be overridden.
 

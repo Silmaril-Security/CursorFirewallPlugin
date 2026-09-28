@@ -349,9 +349,19 @@ function parseMcpToolName(
     : undefined;
 }
 
+function selectedAgentModelId(input: HookRecord): string | undefined {
+  // model_id is the structured selection. model is the legacy slug.
+  // model_params and cursor_version are not model identity.
+  return readString(input.model_id) ?? readString(input.model);
+}
+
 function buildMetadata(input: HookRecord, extra: Record<string, unknown>): Record<string, unknown> {
   return omitUndefined({
-    silmaril: { integration: PLUGIN_NAME, version: PLUGIN_VERSION },
+    silmaril: omitUndefined({
+      integration: PLUGIN_NAME,
+      version: PLUGIN_VERSION,
+      agent_model_id: selectedAgentModelId(input),
+    }),
     cursorHookEvent: readString(input.hook_event_name),
     conversationId: readString(input.conversation_id),
     generationId: readString(input.generation_id),
