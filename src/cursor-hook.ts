@@ -9,6 +9,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readSync,
   realpathSync,
   renameSync,
@@ -47,8 +48,10 @@ const MAC_DEVICE_NAME_MAX_UTF16_UNITS = 256;
 const MAC_DEVICE_NAME_CACHE_TTL_MS = 5 * 60 * 1000;
 const MAC_DEVICE_NAME_FAILURE_RETRY_MS = 5 * 1000;
 const MAC_DEVICE_NAME_CACHE_MAX_BYTES = 4096;
-const MAC_DEVICE_NAME_LOCK_CLEANUP_BUCKETS = 8;
+const MAC_DEVICE_NAME_CLEANUP_LIMIT = 128;
 const MAC_DEVICE_NAME_MAX_EPOCH = 10_000_000_000;
+const DEVICE_NAME_CACHE_GENERATION = /^cursor-device-name\.cache\.(0|[1-9][0-9]{0,15})$/;
+const DEVICE_NAME_LOCK_GENERATION = /^cursor-device-name\.lock\.(0|[1-9][0-9]{0,15})$/;
 const MAC_DEVICE_NAME_REFRESH_ARG = "--silmaril-refresh-device-name";
 const MAC_DEVICE_NAME_LOCK_OWNER = /^[a-f0-9]{32}$/;
 const MAC_DEVICE_NAME_FILE = "/usr/sbin/scutil";
@@ -658,27 +661,55 @@ function claimDeviceNameRefreshLease(homeDirectory: string, now: number): Device
 }
 
 function cleanupOlderDeviceNameGenerations(homeDirectory: string, epoch: number): void {
-  // The pre-bucket lock path is not a generation. Removing that exact path
-  // cannot delete cursor-device-name.lock.<epoch>.
-  unlinkDeviceNameGeneration(path.join(deviceNameStateDirectory(homeDirectory), "cursor-device-name.lock"));
-  for (let age = 1; age <= MAC_DEVICE_NAME_LOCK_CLEANUP_BUCKETS; age += 1) {
-    const older = epoch - age;
-    if (!validDeviceNameEpoch(older)) break;
-    unlinkDeviceNameGeneration(deviceNameLockPath(homeDirectory, older));
-    const retiredCache = older - 1;
-    if (validDeviceNameEpoch(retiredCache)) {
-      unlinkDeviceNameGeneration(deviceNameEpochCachePath(homeDirectory, retiredCache));
+  try {
+    const directory = deviceNameStateDirectory(homeDirectory);
+    const linked = lstatSync(directory);
+    if (!linked.isDirectory() || linked.isSymbolicLink()) return;
+    const retired: { epoch: number; name: string }[] = [];
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const candidate = retiredDeviceNameGeneration(entry.name, epoch);
+      if (candidate === undefined) continue;
+      retired.push({ epoch: candidate, name: entry.name });
     }
+    retired.sort((left, right) => left.epoch - right.epoch);
+    for (const entry of retired.slice(0, MAC_DEVICE_NAME_CLEANUP_LIMIT)) {
+      unlinkDeviceNameGeneration(path.join(directory, entry.name));
+    }
+  } catch {
+    // Retaining an old name must not abort classification or this refresh.
   }
+}
+
+function retiredDeviceNameGeneration(name: string, epoch: number): number | undefined {
+  if (name === "cursor-device-name.lock") return -1;
+  const cache = DEVICE_NAME_CACHE_GENERATION.exec(name);
+  if (cache) {
+    const candidate = canonicalDeviceNameEpoch(cache[1] ?? "");
+    // The current bucket and the previous one are still readable.
+    if (candidate === undefined || candidate >= epoch - 1) return undefined;
+    return candidate;
+  }
+  const lock = DEVICE_NAME_LOCK_GENERATION.exec(name);
+  if (!lock) return undefined;
+  const candidate = canonicalDeviceNameEpoch(lock[1] ?? "");
+  if (candidate === undefined || candidate >= epoch) return undefined;
+  return candidate;
+}
+
+function canonicalDeviceNameEpoch(suffix: string): number | undefined {
+  if (!/^(0|[1-9][0-9]{0,15})$/.test(suffix)) return undefined;
+  const epoch = Number(suffix);
+  if (!validDeviceNameEpoch(epoch) || String(epoch) !== suffix) return undefined;
+  return epoch;
 }
 
 function unlinkDeviceNameGeneration(file: string): void {
   try {
     const linked = lstatSync(file);
-    if (!linked.isFile() && !linked.isSymbolicLink()) return;
+    if (linked.isDirectory() || (!linked.isFile() && !linked.isSymbolicLink())) return;
     unlinkSync(file);
   } catch {
-    // This older generation is already gone.
+    // This older generation is already gone or not removable.
   }
 }
 

@@ -67,6 +67,10 @@ function lockFile(home, now) {
   return path.join(home, "Library", "Application Support", "Silmaril", `cursor-device-name.lock.${epoch}`);
 }
 
+function generationFile(home, kind, epoch) {
+  return path.join(home, "Library", "Application Support", "Silmaril", `cursor-device-name.${kind}.${epoch}`);
+}
+
 async function tempHome() {
   const home = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-device-name-"));
   homes.push(home);
@@ -513,6 +517,58 @@ describe("macOS computer name provenance", { concurrency: 1 }, () => {
     assert.equal(stored.name, "Office Mac");
     assert.equal(stored.epoch, 21);
     assert.equal(Object.hasOwn(stored, "retryAt"), false);
+    assert.equal(withProvenance({}).silmaril.provenance.device_name, "Office Mac");
+  });
+
+  test("a refresh removes successful cache files older than five minutes", async () => {
+    const home = await tempHome();
+    const now = { value: 500_000 };
+    const current = Math.floor(now.value / 5_000);
+    const previous = current - 1;
+    const future = current + 3;
+    const stale = Math.floor((now.value - (5 * 60 * 1000) - 5_000) / 5_000);
+    const directory = path.join(home, "Library", "Application Support", "Silmaril");
+    await mkdir(directory, { recursive: true });
+    const record = (epoch, name) => JSON.stringify({
+      v: 1,
+      epoch,
+      name,
+      expiresAt: now.value + 60_000,
+    });
+    await writeFile(generationFile(home, "cache", stale), record(stale, "Ancient Mac"));
+    await writeFile(generationFile(home, "cache", 1), record(1, "Gap Mac"));
+    await writeFile(generationFile(home, "lock", stale), JSON.stringify({ v: 1, owner: "a".repeat(32), epoch: stale }));
+    await writeFile(generationFile(home, "lock", previous), JSON.stringify({ v: 1, owner: "b".repeat(32), epoch: previous }));
+    await writeFile(generationFile(home, "cache", previous), record(previous, "Recent Mac"));
+    await writeFile(generationFile(home, "cache", future), record(future, "Future Mac"));
+    await writeFile(generationFile(home, "lock", future), JSON.stringify({ v: 1, owner: "c".repeat(32), epoch: future }));
+    const outside = path.join(home, "outside-secret");
+    await writeFile(outside, "keep");
+    await symlink(outside, generationFile(home, "cache", 2));
+    const decoy = generationFile(home, "cache", 4);
+    await mkdir(decoy);
+    await writeFile(path.join(decoy, "nested"), "inside");
+
+    setMacDeviceNameLookupForTests({
+      platform: "darwin",
+      homeDirectory: home,
+      now: () => now.value,
+      command: () => "Office Mac\n",
+    });
+    await refreshMacDeviceNameForTests();
+
+    await assert.rejects(lstat(generationFile(home, "cache", stale)));
+    await assert.rejects(lstat(generationFile(home, "cache", 1)));
+    await assert.rejects(lstat(generationFile(home, "cache", 2)));
+    await assert.rejects(lstat(generationFile(home, "lock", stale)));
+    await assert.rejects(lstat(generationFile(home, "lock", previous)));
+    assert.equal(await readFile(outside, "utf8"), "keep");
+    assert.equal(await readFile(path.join(decoy, "nested"), "utf8"), "inside");
+    assert.equal(JSON.parse(await readFile(generationFile(home, "cache", previous), "utf8")).name, "Recent Mac");
+    assert.equal(JSON.parse(await readFile(generationFile(home, "cache", future), "utf8")).name, "Future Mac");
+    assert.equal((await lstat(generationFile(home, "lock", future))).isSymbolicLink(), false);
+    assert.equal(JSON.parse(await readFile(generationFile(home, "cache", current), "utf8")).name, "Office Mac");
+    assert.equal((await lstat(lockFile(home, now.value))).isFile(), true);
     assert.equal(withProvenance({}).silmaril.provenance.device_name, "Office Mac");
   });
 });
