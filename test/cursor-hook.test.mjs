@@ -139,6 +139,102 @@ test("runtime config defaults and rejects incomplete configuration", async () =>
   assert.equal(resolveRuntimeConfig({ ...BASE_ENV, SILMARIL_ENDPOINT_ID: "NOT-A-UUID" }).endpointId, undefined);
 });
 
+test("selected model id prefers model_id, ignores blanks, and reaches every target", async () => {
+  const modelParams = [{ id: "thinking", value: "not-the-model" }];
+  const withModel = (extra) => hookInput("beforeSubmitPrompt", { prompt: "hello", model_params: modelParams, ...extra });
+  const agentModelId = (extra) => buildCursorTargets(withModel(extra))[0].metadata.silmaril.agent_model_id;
+
+  assert.equal(agentModelId({ model_id: " claude-opus-4-7 ", model: "claude-opus-4-7-thinking-max" }), "claude-opus-4-7");
+  assert.equal(agentModelId({ model: " legacy-slug " }), "legacy-slug");
+  assert.equal(agentModelId({ model_id: " \t", model: "legacy-slug" }), "legacy-slug");
+  assert.equal(agentModelId({ model_id: "", model: "\n" }), undefined);
+  assert.equal(agentModelId({}), undefined);
+  assert.equal(agentModelId({ model_id: { id: "structured-object" }, model_params: modelParams }), undefined);
+
+  const events = [
+    ["beforeSubmitPrompt", { prompt: "hello" }],
+    ["preToolUse", { tool_name: "Shell", tool_input: { command: "pwd" } }],
+    ["beforeReadFile", { content: "file text" }],
+    ["postToolUse", { tool_name: "Shell", tool_output: "ok" }],
+    ["postToolUseFailure", { error_message: "failed" }],
+    ["afterAgentResponse", { text: "done" }],
+    ["afterAgentThought", { text: "reasoning" }],
+    ["subagentStart", { task: "inspect auth", tool_call_id: "task-1" }],
+    ["subagentStop", { summary: "current summary" }],
+  ];
+  for (const [hookEventName, fields] of events) {
+    const targets = buildCursorTargets(hookInput(hookEventName, {
+      ...fields,
+      model_id: "claude-opus-4-7",
+      model: "claude-opus-4-7-thinking-max",
+      model_params: modelParams,
+    }));
+    assert.ok(targets.length >= 1);
+    for (const target of targets) {
+      assert.equal(target.metadata.silmaril.agent_model_id, "claude-opus-4-7");
+      assert.equal(target.metadata.silmaril.integration, "cursor-firewall-plugin");
+      assert.equal(target.metadata.cursorVersion, "9.9.9");
+      assert.equal(target.metadata.model, undefined);
+      assert.equal(target.metadata.model_params, undefined);
+    }
+    if (hookEventName === "afterAgentThought") assert.equal(targets[0].metadata.source, "reasoning");
+    if (hookEventName === "subagentStart") assert.equal(targets[0].metadata.source, "subagent_task");
+    if (hookEventName === "subagentStop") assert.equal(targets[0].metadata.source, "subagent_summary");
+  }
+
+  const calls = [];
+  const output = await runCursorHook(
+    hookInput("beforeSubmitPrompt", {
+      prompt: "hello",
+      model_id: "claude-opus-4-7",
+      model: "claude-opus-4-7-thinking-max",
+      model_params: modelParams,
+    }),
+    BASE_ENV,
+    captureDependencies([{ prediction: "MALICIOUS", score: 0.9, threshold: 0.5 }], [], calls),
+  );
+  assert.equal(output, undefined);
+  const classification = calls.find((call) => Object.hasOwn(call, "text"));
+  assert.equal(classification.options.metadata.silmaril.agent_model_id, "claude-opus-4-7");
+  assert.equal(classification.options.metadata.silmaril.provenance.harness, "cursor");
+  assert.equal(classification.options.metadata.silmaril.provenance.schema_version, 1);
+  assert.deepEqual(classification.options.metadata.silmaril.governance, {
+    agent: "cursor",
+    resource: { kind: "agent", id: "cursor" },
+  });
+  assert.equal(calls.some((call) => Object.hasOwn(call, "texts")), false);
+
+  const originalFetch = globalThis.fetch;
+  const requestBodies = [];
+  globalThis.fetch = async (_input, init) => {
+    requestBodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({ prediction: "BENIGN", score: 0.01, threshold: 0.5 }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    assert.equal(await runCursorHook(
+      hookInput("preToolUse", {
+        tool_name: "Shell",
+        tool_input: { command: "pwd" },
+        model_id: "   ",
+        model: "legacy-slug",
+        model_params: modelParams,
+      }),
+      BASE_ENV,
+    ), undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(requestBodies.length, 1);
+  assert.equal(requestBodies[0].metadata.silmaril.agent_model_id, "legacy-slug");
+  assert.equal(requestBodies[0].metadata.silmaril.provenance.harness, "cursor");
+  assert.equal(requestBodies[0].tool_name, "Shell");
+  assert.equal(JSON.stringify(requestBodies[0]).includes("not-the-model"), false);
+  assert.equal(requestBodies[0].metadata.cursorVersion, "9.9.9");
+});
+
 test("plugin-owned provenance overwrites caller values and preserves unrelated metadata", () => {
   assert.deepEqual(withProvenance({
     trace: "keep",

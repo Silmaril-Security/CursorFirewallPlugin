@@ -1626,9 +1626,16 @@ function parseMcpToolName(toolName, explicitServer) {
   const cursor = /^MCP:([^:]+):(.+)$/.exec(toolName);
   return cursor?.[1] && cursor[2] ? { serverId: cursor[1], toolId: cursor[2] } : void 0;
 }
+function selectedAgentModelId(input) {
+  return readString(input.model_id) ?? readString(input.model);
+}
 function buildMetadata(input, extra) {
   return omitUndefined3({
-    silmaril: { integration: PLUGIN_NAME, version: PLUGIN_VERSION },
+    silmaril: omitUndefined3({
+      integration: PLUGIN_NAME,
+      version: PLUGIN_VERSION,
+      agent_model_id: selectedAgentModelId(input)
+    }),
     cursorHookEvent: readString(input.hook_event_name),
     conversationId: readString(input.conversation_id),
     generationId: readString(input.generation_id),

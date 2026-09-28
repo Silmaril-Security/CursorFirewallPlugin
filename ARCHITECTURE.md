@@ -2,7 +2,7 @@
 
 ## Runtime path
 
-Cursor starts `dist/cursor-hook.js` as a fresh command process and sends one JSON hook event over stdin. The hook validates configuration, maps the event to a Firewall label, invokes the pinned SDK with a stable logical request ID, emits privacy-safe local evidence, and writes at most one host-native JSON response to stdout.
+Cursor starts `dist/cursor-hook.js` as a fresh command process and sends one JSON hook event over stdin. The hook validates configuration, maps the event to a Firewall label, invokes the pinned SDK with a stable logical request ID, emits privacy-safe local evidence, and writes at most one host-native JSON response to stdout. Each classification target carries `metadata.silmaril.agent_model_id` from a nonempty `model_id`, or from the legacy `model` slug when that id is absent or blank.
 
 All configuration, input parsing, SDK construction, classification, and local evidence failures are fail-open. Debug output uses stderr and contains metadata only.
 

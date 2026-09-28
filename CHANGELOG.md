@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Forward the selected Cursor model as `metadata.silmaril.agent_model_id`, preferring a nonempty `model_id` over the legacy `model` slug.
+
 ## 0.2.4
 
 - Restore Cursor-native malicious MCP tool-result replacement in Block mode.
