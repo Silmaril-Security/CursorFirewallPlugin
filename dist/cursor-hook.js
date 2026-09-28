@@ -1433,7 +1433,7 @@ function omitUndefined2(value) {
 
 // src/cursor-hook.ts
 var PLUGIN_NAME = "cursor-firewall-plugin";
-var PLUGIN_VERSION = "0.2.4";
+var PLUGIN_VERSION = "0.2.5";
 var MAX_STDIN_BYTES = 4 * 1024 * 1024;
 var SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
 var MAC_DEVICE_NAME_TIMEOUT_MS = 100;
