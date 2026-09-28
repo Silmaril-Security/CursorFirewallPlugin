@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   flushMacDeviceNameRefreshForTests,
+  refreshMacDeviceNameForTests,
   runCursorHook,
   setMacDeviceNameLookupForTests,
   withProvenance,
@@ -59,6 +60,11 @@ function captureDependencies(results, events = [], calls = []) {
 
 function cacheFile(home) {
   return path.join(home, "Library", "Application Support", "Silmaril", "cursor-device-name.json");
+}
+
+function lockFile(home, now) {
+  const epoch = Math.floor(now / 5_000);
+  return path.join(home, "Library", "Application Support", "Silmaril", `cursor-device-name.lock.${epoch}`);
 }
 
 async function tempHome() {
@@ -293,7 +299,10 @@ describe("macOS computer name provenance", { concurrency: 1 }, () => {
     assert.equal(source.includes("LocalHostName"), false);
     assert.equal(source.includes("execFileSync"), false);
     assert.match(source, /detached:\s*true/);
+    assert.match(source, /child\.on\("error"/);
     assert.match(source, /\.unref\(\)/);
+    assert.equal(source.includes("reclaimDeviceNameLock"), false);
+    assert.match(source, /cursor-device-name\.lock\.\$\{epoch\}/);
     const home = await tempHome();
     let calls = 0;
     setMacDeviceNameLookupForTests({
@@ -310,6 +319,201 @@ describe("macOS computer name provenance", { concurrency: 1 }, () => {
     assert.equal(calls, 0);
     assert.equal(Object.hasOwn(provenance, "device_name"), false);
     assert.equal(provenance.harness, "cursor");
+  });
+
+  test("an asynchronous refresh spawn error does not abort classification", async () => {
+    const home = await tempHome();
+    const crashes = [];
+    const onCrash = (error) => {
+      crashes.push(error);
+    };
+    process.on("uncaughtException", onCrash);
+    try {
+      setMacDeviceNameLookupForTests({
+        platform: "darwin",
+        homeDirectory: home,
+        refreshProgram: path.join(home, "missing-refresh-bin"),
+      });
+      assert.equal(withProvenance({}).silmaril.provenance.device_name, undefined);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(crashes.length, 0);
+      const output = await runCursorHook(
+        hookInput(),
+        { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" },
+        captureDependencies([{ prediction: "MALICIOUS", score: 0.99, threshold: 0.5 }]),
+      );
+      assert.deepEqual(output, {
+        continue: false,
+        user_message: "Silmaril Firewall blocked potentially malicious content.",
+      });
+    } finally {
+      process.off("uncaughtException", onCrash);
+    }
+  });
+
+  test("a cache close failure still publishes a cached name and classifies", async () => {
+    const home = await tempHome();
+    const directory = path.dirname(cacheFile(home));
+    await mkdir(directory, { recursive: true });
+    await writeFile(cacheFile(home), JSON.stringify({
+      v: 1,
+      name: "Office Mac",
+      expiresAt: Date.now() + 60_000,
+    }));
+    let closes = 0;
+    let lookups = 0;
+    setMacDeviceNameLookupForTests({
+      platform: "darwin",
+      homeDirectory: home,
+      closeFile: () => {
+        closes += 1;
+        throw new Error("close failed");
+      },
+      command: () => {
+        lookups += 1;
+        return "Replacement Mac\n";
+      },
+    });
+    const calls = [];
+    const output = await runCursorHook(
+      hookInput(),
+      { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" },
+      captureDependencies([{ prediction: "MALICIOUS", score: 0.99, threshold: 0.5 }], [], calls),
+    );
+    const provenance = calls.find((call) => call.options).options.metadata.silmaril.provenance;
+    assert.ok(closes >= 1);
+    assert.equal(lookups, 0);
+    assert.equal(provenance.device_name, "Office Mac");
+    assert.deepEqual(output, {
+      continue: false,
+      user_message: "Silmaril Firewall blocked potentially malicious content.",
+    });
+
+    const notHome = path.join(home, "home-file");
+    await writeFile(notHome, "not a directory");
+    setMacDeviceNameLookupForTests({
+      platform: "darwin",
+      homeDirectory: notHome,
+      command: () => {
+        throw new Error("should not run");
+      },
+    });
+    assert.equal(withProvenance({}).silmaril.provenance.device_name, undefined);
+    const fallback = await runCursorHook(
+      hookInput(),
+      { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" },
+      captureDependencies([{ prediction: "MALICIOUS", score: 0.99, threshold: 0.5 }]),
+    );
+    assert.deepEqual(fallback, {
+      continue: false,
+      user_message: "Silmaril Firewall blocked potentially malicious content.",
+    });
+  });
+
+  test("concurrent refresh keeps a newer success ahead of an older failure", async () => {
+    const home = await tempHome();
+    const now = { value: 100_000 };
+    let calls = 0;
+    let releaseStale;
+    const stale = new Promise((resolve) => {
+      releaseStale = resolve;
+    });
+    setMacDeviceNameLookupForTests({
+      platform: "darwin",
+      homeDirectory: home,
+      now: () => now.value,
+      command: () => {
+        calls += 1;
+        if (calls === 1) return stale.then(() => { throw new Error("stale failure"); });
+        return "Office Mac\n";
+      },
+    });
+    const older = refreshMacDeviceNameForTests();
+    assert.equal(calls, 1);
+    await refreshMacDeviceNameForTests();
+    assert.equal(calls, 1);
+    assert.equal(withProvenance({}).silmaril.provenance.device_name, undefined);
+    assert.equal(calls, 1);
+
+    now.value += 5_000;
+    await refreshMacDeviceNameForTests();
+    assert.equal(calls, 2);
+    assert.equal(JSON.parse(await readFile(cacheFile(home), "utf8")).name, "Office Mac");
+    releaseStale();
+    await older;
+    const stored = JSON.parse(await readFile(cacheFile(home), "utf8"));
+    assert.equal(stored.name, "Office Mac");
+    assert.equal(Object.hasOwn(stored, "retryAt"), false);
+    assert.equal(withProvenance({}).silmaril.provenance.device_name, "Office Mac");
+
+    const recoveredHome = await tempHome();
+    const recoveredNow = { value: 200_000 };
+    const recovered = [
+      () => { throw new Error("first failure"); },
+      () => "Recovered Mac\n",
+    ];
+    let recoveredIndex = 0;
+    setMacDeviceNameLookupForTests({
+      platform: "darwin",
+      homeDirectory: recoveredHome,
+      now: () => recoveredNow.value,
+      command: () => recovered[recoveredIndex++](),
+    });
+    await refreshMacDeviceNameForTests();
+    recoveredNow.value += 5_000;
+    await refreshMacDeviceNameForTests();
+    assert.equal(JSON.parse(await readFile(cacheFile(recoveredHome), "utf8")).name, "Recovered Mac");
+  });
+
+  test("a later lock generation survives the claimant that saw the expired one", async () => {
+    const home = await tempHome();
+    const now = { value: 100_000 };
+    let calls = 0;
+    let releaseExpired;
+    const expired = new Promise((resolve) => {
+      releaseExpired = resolve;
+    });
+    setMacDeviceNameLookupForTests({
+      platform: "darwin",
+      homeDirectory: home,
+      now: () => now.value,
+      command: () => {
+        calls += 1;
+        if (calls === 1) return expired.then(() => { throw new Error("expired generation failed"); });
+        return "Office Mac\n";
+      },
+    });
+    const older = refreshMacDeviceNameForTests();
+    assert.equal(calls, 1);
+    const expiredLock = lockFile(home, now.value);
+    const expiredLease = JSON.parse(await readFile(expiredLock, "utf8"));
+    assert.equal(expiredLease.epoch, 20);
+    await refreshMacDeviceNameForTests();
+    assert.equal(calls, 1);
+    assert.equal(JSON.parse(await readFile(expiredLock, "utf8")).owner, expiredLease.owner);
+
+    now.value = 105_000;
+    await refreshMacDeviceNameForTests();
+    assert.equal(calls, 2);
+    const liveLock = lockFile(home, now.value);
+    const liveLease = JSON.parse(await readFile(liveLock, "utf8"));
+    assert.equal(liveLease.epoch, 21);
+    assert.notEqual(liveLease.owner, expiredLease.owner);
+    await assert.rejects(lstat(expiredLock));
+    assert.equal(JSON.parse(await readFile(cacheFile(home), "utf8")).name, "Office Mac");
+
+    await refreshMacDeviceNameForTests();
+    assert.equal(calls, 2);
+    assert.deepEqual(JSON.parse(await readFile(liveLock, "utf8")), liveLease);
+
+    releaseExpired();
+    await older;
+    assert.deepEqual(JSON.parse(await readFile(liveLock, "utf8")), liveLease);
+    const stored = JSON.parse(await readFile(cacheFile(home), "utf8"));
+    assert.equal(stored.name, "Office Mac");
+    assert.equal(stored.epoch, 21);
+    assert.equal(Object.hasOwn(stored, "retryAt"), false);
+    assert.equal(withProvenance({}).silmaril.provenance.device_name, "Office Mac");
   });
 });
 
