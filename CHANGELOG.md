@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.5
+
+- Include the macOS Computer Name in captured endpoint provenance when available.
+
 ## 0.2.4
 
 - Restore Cursor-native malicious MCP tool-result replacement in Block mode.
