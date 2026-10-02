@@ -1,6 +1,6 @@
 # Contributing
 
-Use a branch from current `origin/main`. Keep host-native behavior, fail-open defaults, exact `MALICIOUS` enforcement, and raw-content non-retention intact.
+Use a branch from current `origin/main` with Node.js 22 or newer. Keep host-native behavior, fail-open defaults, exact `MALICIOUS` checks, governance `action` `block` on those same native boundaries, and raw-content non-retention intact.
 
 Before submitting a change, run:
 

@@ -12,4 +12,4 @@ The latest tagged release is supported. Security fixes may require upgrading Cur
 
 ## Runtime posture
 
-The plugin defaults to shadow mode and fails open when configuration, parsing, networking, the SDK, evidence, or the output-decision cache fails. Enable blocking only after validating the configured endpoint and local policy expectations.
+When `mode` is omitted, the backend selects the effective mode. If the backend omits mode, the plugin falls back to shadow. The bundled SDK rejects an unrecognized mode, and the hook then fails open. It also fails open when configuration, parsing, networking, the SDK, or evidence fails. Enable blocking only after validating the configured endpoint and local policy expectations.
