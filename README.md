@@ -57,6 +57,11 @@ Every classifier request carries plugin-owned `metadata.silmaril.provenance` wit
 
 Set `SILMARIL_LOCAL_EVENT_DIR` only when the default private evidence spool must be overridden.
 
+### Classification deadline
+
+The configured timeout bounds the entire classification, including throttling retries and response reads. Classification is capped at 8 seconds to leave time for hook output before the host deadline. Deadline errors follow the existing hook error behavior.
+
+
 ## Coverage
 
 | Cursor hook | Firewall label | Shadow behavior | Block-mode capability |
@@ -128,7 +133,3 @@ Report vulnerabilities through GitHub private vulnerability reporting. See [SECU
 - [Silmaril documentation](https://www.silmaril.dev/docs)
 - [Cursor plugins](https://cursor.com/docs/plugins)
 - [Cursor hooks](https://cursor.com/docs/hooks)
-
-### Classification deadline
-
-The configured timeout bounds the entire classification, including throttling retries and response reads. Classification is capped at 8 seconds to leave time for hook output before the host deadline. Deadline errors follow the existing hook error behavior.
