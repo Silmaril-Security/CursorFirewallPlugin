@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3
+
+- Bound classification, retries, response reads, and SDK cleanup to one deadline capped at 8 seconds.
+- Bundle SDK 0.7.1 with cancellation and add shipped-bundle deadline regressions.
+
 ## 0.2.5
 
 - Include the macOS Computer Name in captured endpoint provenance when available.

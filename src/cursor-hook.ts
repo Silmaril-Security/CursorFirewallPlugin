@@ -40,7 +40,7 @@ export { buildLocalProtectionEvent, resolveLocalEventDirectory, writeLocalProtec
 export { configurationPath, resolveRuntimeConfig } from "./runtime-config.js";
 
 export const PLUGIN_NAME = "cursor-firewall-plugin";
-export const PLUGIN_VERSION = "0.2.5";
+export const PLUGIN_VERSION = "0.3.3";
 const MAX_STDIN_BYTES = 4 * 1024 * 1024;
 const SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
 const MAC_DEVICE_NAME_TIMEOUT_MS = 100;
