@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4
+
+- Bundle SDK 0.7.2 so caller cancellation immediately clears attempt timers, including stalled response cleanup after retries.
+
 ## 0.3.3
 
 - Bound classification, retries, response reads, and SDK cleanup to one deadline capped at 8 seconds.

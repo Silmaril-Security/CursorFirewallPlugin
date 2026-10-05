@@ -761,7 +761,7 @@ function sanitizeText(text) {
   }
   return out;
 }
-var SDK_VERSION = "0.7.1";
+var SDK_VERSION = "0.7.2";
 var DEFAULT_TIMEOUT_MS = 1e4;
 var DEFAULT_MAX_RETRIES = 5;
 var MAX_BACKOFF_SECONDS = 30;
@@ -905,7 +905,7 @@ async function readCappedErrorBody(response) {
   }
   return new TextDecoder().decode(body);
 }
-async function discardResponseBody(response) {
+async function releaseDiscardedResponseBody(response) {
   try {
     if (response.body) {
       if (!response.body.locked) {
@@ -915,6 +915,19 @@ async function discardResponseBody(response) {
     }
     await response.text();
   } catch {
+  }
+}
+async function discardResponseBody(response, signal) {
+  signal.throwIfAborted();
+  let onAbort;
+  const aborted = new Promise((_resolve, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    await Promise.race([releaseDiscardedResponseBody(response), aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
   }
 }
 function isAbortLikeError(error) {
@@ -942,6 +955,7 @@ function createAttemptSignal(timeoutMs, callerSignal) {
     );
   }, timeoutMs);
   const onCallerAbort = () => {
+    clearTimeout(timer);
     controller.abort(callerSignal?.reason);
   };
   callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
@@ -1099,7 +1113,7 @@ var Firewall = class {
             attemptSignal.signal
           );
         }
-        await discardResponseBody(response);
+        await discardResponseBody(response, attemptSignal.signal);
       } finally {
         attemptSignal.dispose();
       }
@@ -1550,7 +1564,7 @@ function omitUndefined2(value) {
 
 // src/cursor-hook.ts
 var PLUGIN_NAME = "cursor-firewall-plugin";
-var PLUGIN_VERSION = "0.3.3";
+var PLUGIN_VERSION = "0.3.4";
 var MAX_STDIN_BYTES = 4 * 1024 * 1024;
 var SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
 var MAC_DEVICE_NAME_TIMEOUT_MS = 100;
