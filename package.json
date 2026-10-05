@@ -26,12 +26,13 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "npm run typecheck",
     "install:local": "npm run build && node scripts/install-local.mjs",
-    "test": "npm run build && node --test test/*.test.mjs",
+    "test": "npm run build && node --test test/*.test.mjs && node scripts/test-classification-deadline.mjs",
     "pack:dry": "npm pack --dry-run",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "test:deadline": "npm run build && node scripts/test-classification-deadline.mjs"
   },
   "dependencies": {
-    "@silmaril-security/sdk": "0.6.2"
+    "@silmaril-security/sdk": "0.7.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

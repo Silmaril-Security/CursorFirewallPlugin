@@ -69,7 +69,7 @@ type GovernanceContext = {
 };
 type ClassifyOptions = { hook?: string; toolName?: string; metadata?: Record<string, unknown>; requestId?: string; mode?: FirewallMode };
 type FirewallClient = {
-  classify(text: string, options?: ClassifyOptions): Promise<ClassificationResult>;
+  classify(text: string, options?: ClassifyOptions & { signal?: AbortSignal }): Promise<ClassificationResult>;
 };
 type FirewallConstructor = new (options: FirewallOptions & { mode?: FirewallMode }) => FirewallClient;
 type HookRecord = Record<string, unknown>;
@@ -129,10 +129,11 @@ export async function runCursorHook(
     const firewall = new deps.firewallConstructor({
       apiKey: config.apiKey,
       apiUrl: config.apiUrl,
-      timeoutMs: config.timeoutMs,
+      // Leave time for native hook output within the host deadline.
+      timeoutMs: Math.min(config.timeoutMs, 8000),
       ...(config.mode ? { mode: config.mode } : {}),
     });
-    classified = await classifyTargets(firewall, targets, config.endpointId);
+    classified = await classifyTargets(firewall, targets, config.endpointId, AbortSignal.timeout(Math.min(config.timeoutMs, 8000)));
   } catch (error) {
     debugLog(env, "classification_error", { hookEventName, targetCount: targets.length, ...safeErrorFields(error) });
     return undefined;
@@ -222,6 +223,7 @@ async function classifyTargets(
   firewall: FirewallClient,
   targets: Target[],
   endpointId?: string,
+  signal?: AbortSignal,
 ): Promise<Array<{ target: Target; result: ClassificationResult }>> {
   const [target] = targets;
   if (!target || targets.length !== 1) {
@@ -229,7 +231,7 @@ async function classifyTargets(
   }
   return [{
     target,
-    result: await firewall.classify(target.text, classifyOptions(target, endpointId)),
+    result: await firewall.classify(target.text, { ...classifyOptions(target, endpointId), ...(signal ? { signal } : {}) }),
   }];
 }
 

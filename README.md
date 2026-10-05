@@ -2,7 +2,7 @@
 
 Silmaril Firewall lifecycle protection for Cursor agents and subagents.
 
-The plugin classifies host-visible prompts, tool calls, tool results, file reads, assistant output, reasoning blocks, and subagent activity with the bundled `@silmaril-security/sdk` 0.6.2. Shadow and Warn return no hook output. Block acts at native denial boundaries, and replaces malicious MCP tool results, only for the exact prediction `MALICIOUS` or a governance action `block`. Other completed-output boundaries remain unchanged and record `block_unavailable`.
+The plugin classifies host-visible prompts, tool calls, tool results, file reads, assistant output, reasoning blocks, and subagent activity with the bundled `@silmaril-security/sdk` 0.7.1. Shadow and Warn return no hook output. Block acts at native denial boundaries, and replaces malicious MCP tool results, only for the exact prediction `MALICIOUS` or a governance action `block`. Other completed-output boundaries remain unchanged and record `block_unavailable`.
 
 ## Install
 
@@ -117,7 +117,7 @@ npm run pack:dry
 npm run install:local
 ```
 
-The committed `dist/cursor-hook.js` is rebuilt from TypeScript and bundles the pinned `@silmaril-security/sdk@0.6.2`, so backend-selected mode and governance decisions are preserved and users do not need to install dependencies after cloning a release.
+The committed `dist/cursor-hook.js` is rebuilt from TypeScript and bundles the pinned `@silmaril-security/sdk@0.7.1`, so backend-selected mode and governance decisions are preserved and users do not need to install dependencies after cloning a release.
 
 ## Security and license
 
@@ -128,3 +128,7 @@ Report vulnerabilities through GitHub private vulnerability reporting. See [SECU
 - [Silmaril documentation](https://www.silmaril.dev/docs)
 - [Cursor plugins](https://cursor.com/docs/plugins)
 - [Cursor hooks](https://cursor.com/docs/hooks)
+
+### Classification deadline
+
+The configured timeout bounds the entire classification, including throttling retries and response reads. Classification is capped at 8 seconds to leave time for hook output before the host deadline. Deadline errors follow the existing hook error behavior.

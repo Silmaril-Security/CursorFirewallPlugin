@@ -620,7 +620,7 @@ test("package and Cursor manifests preserve release invariants", async () => {
   const hooksJson = JSON.parse(await readFile(new URL("../hooks/hooks.json", import.meta.url), "utf8"));
   assert.equal(packageJson.version, "0.2.5");
   assert.equal(pluginJson.version, packageJson.version);
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.6.2");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.7.1");
   assert.equal(packageJson.private, true);
   assert.equal(hooksJson.hooks.beforeSubmitPrompt[0].failClosed, false);
   assert.equal(hooksJson.hooks.subagentStop[0].loop_limit, 1);
