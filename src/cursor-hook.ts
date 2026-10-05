@@ -1,3 +1,4 @@
+import { withClassificationDeadline } from "./classification-deadline.js";
 import { Firewall, HookLabel, type FirewallOptions } from "@silmaril-security/sdk";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -133,7 +134,8 @@ export async function runCursorHook(
       timeoutMs: Math.min(config.timeoutMs, 8000),
       ...(config.mode ? { mode: config.mode } : {}),
     });
-    classified = await classifyTargets(firewall, targets, config.endpointId, AbortSignal.timeout(Math.min(config.timeoutMs, 8000)));
+    classified = await withClassificationDeadline(config.timeoutMs, (signal) =>
+        classifyTargets(firewall, targets, config.endpointId, signal));
   } catch (error) {
     debugLog(env, "classification_error", { hookEventName, targetCount: targets.length, ...safeErrorFields(error) });
     return undefined;

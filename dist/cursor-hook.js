@@ -1,3 +1,22 @@
+// src/classification-deadline.ts
+function withClassificationDeadline(timeoutMs, classify) {
+  const signal = AbortSignal.timeout(Math.min(timeoutMs, 8e3));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve().then(() => classify(signal)).then(
+      (result) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
 // node_modules/@silmaril-security/sdk/dist/index.js
 import { randomUUID } from "crypto";
 var __defProp = Object.defineProperty;
@@ -1580,7 +1599,7 @@ async function runCursorHook(input, env = process.env, dependencies = {}) {
       timeoutMs: Math.min(config.timeoutMs, 8e3),
       ...config.mode ? { mode: config.mode } : {}
     });
-    classified = await classifyTargets(firewall, targets, config.endpointId, AbortSignal.timeout(Math.min(config.timeoutMs, 8e3)));
+    classified = await withClassificationDeadline(config.timeoutMs, (signal) => classifyTargets(firewall, targets, config.endpointId, signal));
   } catch (error) {
     debugLog(env, "classification_error", { hookEventName, targetCount: targets.length, ...safeErrorFields(error) });
     return void 0;
