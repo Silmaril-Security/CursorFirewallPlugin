@@ -1,3 +1,4 @@
+import { withClassificationDeadline } from "./classification-deadline.js";
 import { Firewall, HookLabel, type FirewallOptions } from "@silmaril-security/sdk";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -39,7 +40,7 @@ export { buildLocalProtectionEvent, resolveLocalEventDirectory, writeLocalProtec
 export { configurationPath, resolveRuntimeConfig } from "./runtime-config.js";
 
 export const PLUGIN_NAME = "cursor-firewall-plugin";
-export const PLUGIN_VERSION = "0.2.5";
+export const PLUGIN_VERSION = "0.3.3";
 const MAX_STDIN_BYTES = 4 * 1024 * 1024;
 const SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
 const MAC_DEVICE_NAME_TIMEOUT_MS = 100;
@@ -69,7 +70,7 @@ type GovernanceContext = {
 };
 type ClassifyOptions = { hook?: string; toolName?: string; metadata?: Record<string, unknown>; requestId?: string; mode?: FirewallMode };
 type FirewallClient = {
-  classify(text: string, options?: ClassifyOptions): Promise<ClassificationResult>;
+  classify(text: string, options?: ClassifyOptions & { signal?: AbortSignal }): Promise<ClassificationResult>;
 };
 type FirewallConstructor = new (options: FirewallOptions & { mode?: FirewallMode }) => FirewallClient;
 type HookRecord = Record<string, unknown>;
@@ -129,10 +130,12 @@ export async function runCursorHook(
     const firewall = new deps.firewallConstructor({
       apiKey: config.apiKey,
       apiUrl: config.apiUrl,
-      timeoutMs: config.timeoutMs,
+      // Leave time for native hook output within the host deadline.
+      timeoutMs: Math.min(config.timeoutMs, 8000),
       ...(config.mode ? { mode: config.mode } : {}),
     });
-    classified = await classifyTargets(firewall, targets, config.endpointId);
+    classified = await withClassificationDeadline(config.timeoutMs, (signal) =>
+        classifyTargets(firewall, targets, config.endpointId, signal));
   } catch (error) {
     debugLog(env, "classification_error", { hookEventName, targetCount: targets.length, ...safeErrorFields(error) });
     return undefined;
@@ -222,6 +225,7 @@ async function classifyTargets(
   firewall: FirewallClient,
   targets: Target[],
   endpointId?: string,
+  signal?: AbortSignal,
 ): Promise<Array<{ target: Target; result: ClassificationResult }>> {
   const [target] = targets;
   if (!target || targets.length !== 1) {
@@ -229,7 +233,7 @@ async function classifyTargets(
   }
   return [{
     target,
-    result: await firewall.classify(target.text, classifyOptions(target, endpointId)),
+    result: await firewall.classify(target.text, { ...classifyOptions(target, endpointId), ...(signal ? { signal } : {}) }),
   }];
 }
 
