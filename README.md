@@ -37,7 +37,7 @@ The macOS app writes a private configuration file at `~/.cursor/silmaril-firewal
 }
 ```
 
-The file must be a regular file owned by the current user with no group or world permissions. Omitting `mode` falls back to Shadow on current classify responses. Set `shadow`, `warn`, or `block` explicitly; explicit mode wins over legacy booleans. Symbolic links, files larger than 64 KiB, malformed JSON, invalid recognized fields, and insecure permissions are rejected without falling back to ambient credentials. `SILMARIL_CONFIG_PATH` can select a different private file.
+The file must be a regular file owned by the current user with no group or world permissions. Omitting both `mode` and `blockMalicious` falls back to Shadow on current classify responses. Set `shadow`, `warn`, or `block` explicitly; explicit mode wins over legacy booleans. Symbolic links, files larger than 64 KiB, malformed JSON, invalid recognized fields, and insecure permissions are rejected without falling back to ambient credentials. `SILMARIL_CONFIG_PATH` can select a different private file.
 
 Environment variables remain supported as a fallback when the private file is missing. When the private file exists, it is authoritative for enabled state, credentials, timeout, and mode so ambient shell variables cannot silently replace app-managed protection. `SILMARIL_DEBUG` remains an explicit diagnostic override.
 
