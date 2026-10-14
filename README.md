@@ -37,7 +37,7 @@ The macOS app writes a private configuration file at `~/.cursor/silmaril-firewal
 }
 ```
 
-The file must be a regular file owned by the current user with no group or world permissions. Omit `mode` to use the backend, or set `shadow`, `warn`, or `block`; explicit mode wins over legacy booleans. Symbolic links, files larger than 64 KiB, malformed JSON, invalid recognized fields, and insecure permissions are rejected without falling back to ambient credentials. `SILMARIL_CONFIG_PATH` can select a different private file.
+The file must be a regular file owned by the current user with no group or world permissions. Omitting both `mode` and `blockMalicious` falls back to Shadow on current classify responses. Set `shadow`, `warn`, or `block` explicitly; explicit mode wins over legacy booleans. Symbolic links, files larger than 64 KiB, malformed JSON, invalid recognized fields, and insecure permissions are rejected without falling back to ambient credentials. `SILMARIL_CONFIG_PATH` can select a different private file.
 
 Environment variables remain supported as a fallback when the private file is missing. When the private file exists, it is authoritative for enabled state, credentials, timeout, and mode so ambient shell variables cannot silently replace app-managed protection. `SILMARIL_DEBUG` remains an explicit diagnostic override.
 
@@ -51,7 +51,7 @@ export SILMARIL_DEBUG="false"
 export SILMARIL_ENABLED="true"
 ```
 
-`SILMARIL_TIMEOUT_MS` accepts `250` through `10000`. A value outside that range keeps the 2500 ms default. An invalid `timeoutMs` in the private file rejects the file. `SILMARIL_BLOCK_MALICIOUS=false` selects shadow; omit both `SILMARIL_MODE` and `SILMARIL_BLOCK_MALICIOUS` to leave the effective mode to the backend. Missing or insecure configuration, malformed hook input, invalid classifier responses, SDK failures, network errors, and timeouts fail open. `SILMARIL_DEBUG=true` writes metadata-only diagnostics to stderr; raw classified content is never logged.
+`SILMARIL_TIMEOUT_MS` accepts `250` through `10000`. A value outside that range keeps the 2500 ms default. An invalid `timeoutMs` in the private file rejects the file. `SILMARIL_BLOCK_MALICIOUS=false` selects shadow; omitting both `SILMARIL_MODE` and `SILMARIL_BLOCK_MALICIOUS` falls back to shadow on current responses. Missing or insecure configuration, malformed hook input, invalid classifier responses, SDK failures, network errors, and timeouts fail open. `SILMARIL_DEBUG=true` writes metadata-only diagnostics to stderr; raw classified content is never logged.
 
 Every classifier request carries plugin-owned `metadata.silmaril.provenance` with `schema_version` 1 and `harness` `cursor`. A canonical UUID v4 is sent as `endpoint_id` when configured; otherwise that field is omitted and classification continues. `device_name` is included only when a previously validated macOS Computer Name is available.
 
@@ -85,7 +85,7 @@ Cursor Tab/inline-completion hooks are not included. Local plugin installation d
 
 ## Enforcement semantics
 
-Shadow and Warn return no hook output. Malicious Warn records `warnDelivery` as `unsupported`. Omit mode to use the backend, set `SILMARIL_MODE=block` for a pilot override, or use the legacy block boolean. Explicit mode wins over that boolean and over the backend mode. If the backend omits mode, the plugin uses shadow. A native block requires effective mode `block` and either `prediction === "MALICIOUS"` or governance `action` `block`. Other prediction strings do not block by themselves.
+Shadow and Warn return no hook output. Malicious Warn records `warnDelivery` as `unsupported`. Current responses omit mode, so omitting local mode and the legacy boolean selects shadow. Set `SILMARIL_MODE=block` for explicit enforcement, or use the legacy block boolean. Explicit mode wins over that boolean and over the backend mode. If the backend omits mode, the plugin uses shadow. A native block requires effective mode `block` and either `prediction === "MALICIOUS"` or governance `action` `block`. Other prediction strings do not block by themselves.
 
 Post-execution hooks cannot undo tool side effects. Block replaces a malicious MCP result with `updated_mcp_tool_output` and the same safe message in `additional_context` before model reuse. Generic tool results and other unsupported completed-output boundaries remain unchanged and record `block_unavailable`.
 
@@ -122,7 +122,7 @@ npm run pack:dry
 npm run install:local
 ```
 
-The committed `dist/cursor-hook.js` is rebuilt from TypeScript and bundles the pinned `@silmaril-security/sdk@0.7.2`, so backend-selected mode and governance decisions are preserved and users do not need to install dependencies after cloning a release.
+The committed `dist/cursor-hook.js` is rebuilt from TypeScript and bundles the pinned `@silmaril-security/sdk@0.7.2`, so explicit local modes, compatible legacy response modes, and governance decisions are preserved and users do not need to install dependencies after cloning a release.
 
 ## Security and license
 
