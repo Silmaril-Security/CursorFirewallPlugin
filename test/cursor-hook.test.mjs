@@ -179,6 +179,16 @@ test("governance context normalizes Cursor tool, MCP, and file-read resources", 
     agent: "cursor",
     resource: { kind: "mcp_tool", id: "create_issue", parent_id: "github" },
   });
+  const serverlessMcp = buildCursorTargets(hookInput("postToolUse", {
+    tool_name: "MCP:fetch",
+    tool_output: "text",
+  }))[0];
+  const serverlessGovernance = governanceContext(serverlessMcp);
+  assert.deepEqual(serverlessGovernance, {
+    agent: "cursor",
+    resource: { kind: "tool", id: "MCP:fetch" },
+  });
+  assert.equal(Object.hasOwn(serverlessGovernance.resource, "parent_id"), false);
   const explicitMcp = buildCursorTargets(hookInput("preToolUse", {
     tool_name: "create_issue",
     mcp_server_name: "github",
@@ -392,7 +402,14 @@ test("postToolUse replaces MCP output while generic tools stay explicitly unavai
     captureDependencies([{ prediction: "MALICIOUS" }], events),
   );
   assert.equal(generic, undefined);
+  const emptyMcp = await runCursorHook(
+    hookInput("postToolUse", { tool_name: "MCP:", tool_output: "unsafe" }),
+    env,
+    captureDependencies([{ prediction: "MALICIOUS" }], events),
+  );
+  assert.equal(emptyMcp, undefined);
   for (const identity of [
+    { tool_name: "MCP:fetch" },
     { tool_name: "MCP:github:fetch" },
     { tool_name: "mcp__github__fetch" },
     { tool_name: "fetch", mcp_server_name: "github" },
@@ -409,8 +426,26 @@ test("postToolUse replaces MCP output while generic tools stay explicitly unavai
     assert.doesNotMatch(JSON.stringify(mcp), /unsafe/u);
   }
   assert.equal(events[0].blockUnavailable, true);
-  assert.ok(events.slice(1).every((event) => event.blockUnavailable === undefined));
-  assert.ok(events.slice(1).every((event) => event.nativeAction === "content_replaced"));
+  assert.equal(events[1].blockUnavailable, true);
+  assert.ok(events.slice(2).every((event) => event.blockUnavailable === undefined));
+  assert.ok(events.slice(2).every((event) => event.nativeAction === "content_replaced"));
+});
+
+test("postToolUse MCP replacement remains inactive in Shadow and Warn modes", async () => {
+  for (const mode of ["shadow", "warn"]) {
+    const events = [];
+    const output = await runCursorHook(
+      hookInput("postToolUse", { tool_name: "MCP:fetch", tool_output: "unsafe" }),
+      { ...BASE_ENV, SILMARIL_MODE: mode },
+      captureDependencies([{ prediction: "MALICIOUS" }], events),
+    );
+    assert.equal(output, undefined);
+    assert.equal(events[0].mode, mode);
+    assert.equal(events[0].policyDecision, "monitor");
+    assert.equal(events[0].nativeAction, "allowed");
+    assert.equal(events[0].blockUnavailable, undefined);
+    assert.equal(events[0].warnDelivery, mode === "warn" ? "unsupported" : undefined);
+  }
 });
 
 test("warn mode remains unchanged where Cursor cannot deliver same-turn context", async () => {

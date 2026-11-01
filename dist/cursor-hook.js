@@ -1665,7 +1665,7 @@ function buildCursorTargets(input) {
       return makeTarget(readString(input.content), HookLabel.TOOL_RESPONSE, "tool_result", "deny", "0", "Read");
     case "postToolUse": {
       const toolName = readString(input.tool_name);
-      const capability = parseMcpToolName(toolName ?? "", readString(input.mcp_server_name)) ? "replace_mcp" : "none";
+      const capability = hasMcpReplacementCapability(toolName ?? "", readString(input.mcp_server_name)) ? "replace_mcp" : "none";
       return makeTarget(readTextOrSerialized(input.tool_output), HookLabel.TOOL_RESPONSE, "post_tool", capability);
     }
     case "postToolUseFailure":
@@ -2219,6 +2219,9 @@ function governanceContext(target) {
     agent: "cursor",
     resource: { kind: "agent", id: "cursor" }
   };
+}
+function hasMcpReplacementCapability(toolName, explicitServer) {
+  return parseMcpToolName(toolName, explicitServer) !== void 0 || /^MCP:.+$/u.test(toolName);
 }
 function parseMcpToolName(toolName, explicitServer) {
   if (explicitServer) {
