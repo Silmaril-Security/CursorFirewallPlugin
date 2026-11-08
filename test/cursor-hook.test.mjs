@@ -189,6 +189,14 @@ test("governance context normalizes Cursor tool, MCP, and file-read resources", 
     resource: { kind: "tool", id: "MCP:fetch" },
   });
   assert.equal(Object.hasOwn(serverlessGovernance.resource, "parent_id"), false);
+  assert.deepEqual(governanceContext({
+    hookEventName: "preToolUse",
+    toolName: "MCP:github:fetch",
+    metadata: { mcpServerName: "untrusted-metadata-server" },
+  }), {
+    agent: "cursor",
+    resource: { kind: "tool", id: "MCP:github:fetch" },
+  });
   const explicitMcp = buildCursorTargets(hookInput("preToolUse", {
     tool_name: "create_issue",
     mcp_server_name: "github",
@@ -409,8 +417,6 @@ test("postToolUse replaces MCP output while generic tools stay explicitly unavai
   );
   assert.equal(emptyMcp, undefined);
   for (const identity of [
-    { tool_name: "MCP:fetch" },
-    { tool_name: "MCP:github:fetch" },
     { tool_name: "mcp__github__fetch" },
     { tool_name: "fetch", mcp_server_name: "github" },
   ]) {
@@ -431,11 +437,96 @@ test("postToolUse replaces MCP output while generic tools stay explicitly unavai
   assert.ok(events.slice(2).every((event) => event.nativeAction === "content_replaced"));
 });
 
-test("postToolUse MCP replacement remains inactive in Shadow and Warn modes", async () => {
+test("hosted HTTP MCP redacted results bypass classification and replacement", async () => {
+  const nativeMarkers = [
+    { redacted: true, isError: false },
+    '{"redacted":true,"isError":true}',
+  ];
+  for (const toolOutput of nativeMarkers) {
+    for (const [mode, blockUnavailable] of [["shadow", undefined], ["block", true]]) {
+      const calls = [];
+      const events = [];
+      const input = hookInput("postToolUse", {
+        tool_name: "MCP:fetch",
+        tool_use_id: "http-mcp-tool-use",
+        tool_output: toolOutput,
+      });
+      const output = await runCursorHook(
+        input,
+        { ...BASE_ENV, SILMARIL_MODE: mode },
+        captureDependencies([{ prediction: "MALICIOUS" }], events, calls),
+      );
+      assert.equal(output, undefined);
+      assert.equal(calls.length, 0);
+      assert.equal(events.length, 1);
+      assert.equal(events[0].prediction, "unavailable");
+      assert.equal(events[0].policyDecision, "unavailable");
+      assert.equal(events[0].nativeAction, "unavailable");
+      assert.equal(events[0].blockUnavailable, blockUnavailable);
+      assert.equal(events[0].toolDisplayName, "MCP:fetch");
+      assert.ok(events[0].requestFingerprint);
+      assert.ok(events[0].sessionFingerprint);
+      assert.equal(buildCursorTargets(input).length, 0);
+    }
+  }
+
+  for (const toolOutput of [
+    '{"redacted":true,"extra":"preserved"}',
+    '{"redacted":true',
+    "ordinary output",
+  ]) {
+    const calls = [];
+    const events = [];
+    const input = hookInput("postToolUse", {
+      tool_name: "MCP:fetch",
+      tool_output: toolOutput,
+    });
+    const nonMarker = await runCursorHook(
+      input,
+      { ...BASE_ENV, SILMARIL_MODE: "block" },
+      captureDependencies([{ prediction: "MALICIOUS" }], events, calls),
+    );
+    assert.equal(nonMarker, undefined);
+    const classificationCalls = calls.filter((call) => Object.hasOwn(call, "text"));
+    assert.equal(classificationCalls.length, 1);
+    assert.equal(classificationCalls[0].text, toolOutput);
+    assert.equal(buildCursorTargets(input)[0].text, toolOutput);
+    assert.equal(events[0].nativeAction, "allowed");
+    assert.equal(events[0].blockUnavailable, true);
+  }
+});
+
+test("HTTP MCP pre-tool denial and local MCP replacement remain supported", async () => {
+  const env = { ...BASE_ENV, SILMARIL_MODE: "block" };
+  const denied = await runCursorHook(
+    hookInput("preToolUse", {
+      tool_name: "MCP:fetch",
+      tool_use_id: "http-mcp-call",
+      tool_input: { url: "https://example.test" },
+    }),
+    env,
+    captureDependencies([{ prediction: "MALICIOUS" }]),
+  );
+  assert.equal(denied.permission, "deny");
+
+  const calls = [];
+  const local = await runCursorHook(
+    hookInput("postToolUse", {
+      tool_name: "mcp__github__fetch",
+      tool_output: '{"redacted":true}',
+    }),
+    env,
+    captureDependencies([{ prediction: "MALICIOUS" }], [], calls),
+  );
+  assert.equal(calls.filter((call) => Object.hasOwn(call, "text")).length, 1);
+  assert.equal(local.updated_mcp_tool_output.error, "Silmaril Firewall blocked potentially malicious content.");
+});
+
+test("postToolUse local MCP replacement remains inactive in Shadow and Warn modes", async () => {
   for (const mode of ["shadow", "warn"]) {
     const events = [];
     const output = await runCursorHook(
-      hookInput("postToolUse", { tool_name: "MCP:fetch", tool_output: "unsafe" }),
+      hookInput("postToolUse", { tool_name: "mcp__github__fetch", tool_output: "unsafe" }),
       { ...BASE_ENV, SILMARIL_MODE: mode },
       captureDependencies([{ prediction: "MALICIOUS" }], events),
     );
@@ -587,7 +678,7 @@ test("local evidence is redacted and written atomically with private permissions
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-evidence-"));
   const event = buildLocalProtectionEvent({
     pluginName: "cursor-firewall-plugin",
-    pluginVersion: "0.3.4",
+    pluginVersion: "0.3.5",
     hook: "user_input",
     mode: "block",
     requestId: "raw-request-id",
@@ -653,11 +744,14 @@ test("package and Cursor manifests preserve release invariants", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const pluginJson = JSON.parse(await readFile(new URL("../.cursor-plugin/plugin.json", import.meta.url), "utf8"));
   const hooksJson = JSON.parse(await readFile(new URL("../hooks/hooks.json", import.meta.url), "utf8"));
-  assert.equal(packageJson.version, "0.3.4");
+  assert.equal(packageJson.version, "0.3.5");
   assert.equal(pluginJson.version, packageJson.version);
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.7.2");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.8.2");
   assert.equal(packageJson.private, true);
   assert.equal(hooksJson.hooks.beforeSubmitPrompt[0].failClosed, false);
   assert.equal(hooksJson.hooks.subagentStop[0].loop_limit, 1);
+  assert.ok(Object.values(hooksJson.hooks).flat().every(
+    ({ command }) => command === 'node "$CURSOR_PLUGIN_ROOT/dist/cursor-hook.js"',
+  ));
   await stat(new URL("../dist/cursor-hook.js", import.meta.url));
 });

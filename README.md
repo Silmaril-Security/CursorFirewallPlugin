@@ -2,7 +2,7 @@
 
 Silmaril Firewall lifecycle protection for Cursor agents and subagents.
 
-The plugin classifies host-visible prompts, tool calls, tool results, file reads, assistant output, reasoning blocks, and subagent activity with the bundled `@silmaril-security/sdk` 0.7.2. Shadow and Warn return no hook output. Block acts at native denial boundaries, and replaces malicious MCP tool results, only for the exact prediction `MALICIOUS` or a governance action `block`. Other completed-output boundaries remain unchanged and record `block_unavailable`.
+The plugin classifies host-visible prompts, tool calls, tool results, file reads, assistant output, reasoning blocks, and subagent activity with the bundled `@silmaril-security/sdk` 0.8.2. Shadow and Warn return no hook output. Block acts at native denial boundaries, and replaces malicious locally exposed MCP tool results, only for the exact prediction `MALICIOUS` or a governance action `block`. Other completed-output boundaries remain unchanged and record `block_unavailable`.
 
 ## Install
 
@@ -53,7 +53,7 @@ export SILMARIL_ENABLED="true"
 
 `SILMARIL_TIMEOUT_MS` accepts `250` through `10000`. A value outside that range keeps the 2500 ms default. An invalid `timeoutMs` in the private file rejects the file. `SILMARIL_BLOCK_MALICIOUS=false` selects shadow; omitting both `SILMARIL_MODE` and `SILMARIL_BLOCK_MALICIOUS` falls back to shadow on current responses. Missing or insecure configuration, malformed hook input, invalid classifier responses, SDK failures, network errors, and timeouts fail open. `SILMARIL_DEBUG=true` writes metadata-only diagnostics to stderr; raw classified content is never logged.
 
-Every classifier request carries plugin-owned `metadata.silmaril.provenance` with `schema_version` 1 and `harness` `cursor`. A canonical UUID v4 is sent as `endpoint_id` when configured; otherwise that field is omitted and classification continues. `device_name` is included only when a previously validated macOS Computer Name is available.
+Every classifier request carries plugin-owned `metadata.silmaril.provenance` with `schema_version` 1 and `harness` `cursor`. Governed resources use the SDK's canonical top-level `resource` field while retaining `metadata.silmaril.governance` as compatibility attribution. A canonical UUID v4 is sent as `endpoint_id` when configured; otherwise that field is omitted and classification continues. `device_name` is included only when a previously validated macOS Computer Name is available.
 
 Set `SILMARIL_LOCAL_EVENT_DIR` only when the default private evidence spool must be overridden.
 
@@ -69,7 +69,7 @@ The configured timeout bounds the entire classification, including throttling re
 | `beforeSubmitPrompt` | `user_input` | Observe | Prevent prompt submission |
 | `preToolUse` | `tool_call` | Observe | Deny tool execution |
 | `beforeReadFile` | `tool_response` | Observe | Deny content before model consumption |
-| `postToolUse` | `tool_response` | Observe | Replace MCP tool output; generic tools record `block_unavailable` |
+| `postToolUse` | `tool_response` | Observe | Replace locally exposed MCP tool output; generic and hosted HTTP MCP results cannot be replaced |
 | `postToolUseFailure` | `tool_response` | Observe | Preserve the failure and record `block_unavailable` |
 | `afterAgentResponse` | `llm_output` | Observe | Preserve completed response and record `block_unavailable` |
 | `stop` | None | No classification | No mutation |
@@ -87,7 +87,7 @@ Cursor Tab/inline-completion hooks are not included. Local plugin installation d
 
 Shadow and Warn return no hook output. Malicious Warn records `warnDelivery` as `unsupported`. Current responses omit mode, so omitting local mode and the legacy boolean selects shadow. Set `SILMARIL_MODE=block` for explicit enforcement, or use the legacy block boolean. Explicit mode wins over that boolean and over the backend mode. If the backend omits mode, the plugin uses shadow. A native block requires effective mode `block` and either `prediction === "MALICIOUS"` or governance `action` `block`. Other prediction strings do not block by themselves.
 
-Post-execution hooks cannot undo tool side effects. Block replaces a malicious MCP result with `updated_mcp_tool_output` and the same safe message in `additional_context` before model reuse. Generic tool results and other unsupported completed-output boundaries remain unchanged and record `block_unavailable`.
+Post-execution hooks cannot undo tool side effects. Block replaces a malicious local/canonical MCP result with `updated_mcp_tool_output` and the same safe message in `additional_context` before model reuse. Cursor Cloud HTTP MCP `postToolUse` events expose only `{ "redacted": true }` (optionally with `isError`), so the plugin does not classify that placeholder or return replacement output; it records classification, policy decision, and native action as unavailable. Generic tool results and other unsupported completed-output boundaries remain unchanged and record `block_unavailable`.
 
 ## Local evidence
 
@@ -122,7 +122,7 @@ npm run pack:dry
 npm run install:local
 ```
 
-The committed `dist/cursor-hook.js` is rebuilt from TypeScript and bundles the pinned `@silmaril-security/sdk@0.7.2`, so explicit local modes, compatible legacy response modes, and governance decisions are preserved and users do not need to install dependencies after cloning a release.
+The committed `dist/cursor-hook.js` is rebuilt from TypeScript and bundles the pinned `@silmaril-security/sdk@0.8.2`, so explicit local modes, compatible legacy response modes, canonical governance resources, and governance decisions are preserved and users do not need to install dependencies after cloning a release.
 
 ## Security and license
 

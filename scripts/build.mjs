@@ -16,6 +16,6 @@ await build({
   target: "node22",
   bundle: true,
   packages: "bundle",
-  external: ["@langchain/core/callbacks/base"],
+  external: ["@langchain/core/*"],
   sourcemap: false,
 });

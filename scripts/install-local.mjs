@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PLUGIN_DIRECTORY_NAME = "silmaril-firewall";
+const PORTABLE_HOOK_COMMAND = 'node "$CURSOR_PLUGIN_ROOT/dist/cursor-hook.js"';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 export async function installLocalPlugin({
@@ -13,7 +14,7 @@ export async function installLocalPlugin({
 } = {}) {
   const packageManifest = JSON.parse(await readFile(path.join(sourceRoot, "package.json"), "utf8"));
   const packageEntries = ["package.json", ...packageManifest.files];
-  const target = path.join(localPluginsRoot, PLUGIN_DIRECTORY_NAME);
+  const target = path.resolve(localPluginsRoot, PLUGIN_DIRECTORY_NAME);
 
   await mkdir(localPluginsRoot, { recursive: true });
   const staging = await mkdtemp(path.join(localPluginsRoot, `.${PLUGIN_DIRECTORY_NAME}-staging-`));
@@ -28,6 +29,7 @@ export async function installLocalPlugin({
       await cp(source, destination, { recursive: true, errorOnExist: true, force: false });
     }
     await rejectSymbolicLinks(staging);
+    await rewriteLocalHookCommands(staging, target);
 
     if (await exists(target)) {
       await rename(target, backup);
@@ -43,6 +45,28 @@ export async function installLocalPlugin({
     }
     throw error;
   }
+}
+
+async function rewriteLocalHookCommands(staging, target) {
+  const manifestPath = path.join(staging, "hooks", "hooks.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  let rewritten = 0;
+  for (const entries of Object.values(manifest.hooks ?? {})) {
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (entry?.command !== PORTABLE_HOOK_COMMAND) continue;
+      entry.command = `node ${shellQuote(path.join(target, "dist", "cursor-hook.js"))}`;
+      rewritten += 1;
+    }
+  }
+  if (rewritten === 0) {
+    throw new Error("Packaged plugin contains no portable hook commands");
+  }
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+}
+
+function shellQuote(value) {
+  return `'${value.replaceAll("'", `'\"'\"'`)}'`;
 }
 
 function confinedPath(root, entry) {
