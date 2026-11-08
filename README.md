@@ -6,10 +6,13 @@ The plugin classifies host-visible prompts, tool calls, tool results, file reads
 
 ## Install
 
-Clone the repository and install a lean copy into Cursor's local plugin directory. Node.js 22 or newer is required:
+Release [v0.3.5](https://github.com/Silmaril-Security/CursorFirewallPlugin/releases/tag/v0.3.5)
+is available. Check out that release and install a lean copy into Cursor's
+local plugin directory for a reproducible installation. Node.js 22 or newer is
+required:
 
 ```sh
-git clone https://github.com/Silmaril-Security/CursorFirewallPlugin.git
+git clone --branch v0.3.5 --depth 1 https://github.com/Silmaril-Security/CursorFirewallPlugin.git
 cd CursorFirewallPlugin
 npm ci
 npm run install:local
@@ -20,6 +23,7 @@ Cursor rejects local-plugin symlinks whose targets are outside `~/.cursor/plugin
 Restart Cursor or run **Developer: Reload Window**. Confirm **Silmaril Firewall** appears under **Customize → Plugins** and inspect the Hooks output channel for loading errors.
 
 This repository intentionally has no Cursor Marketplace manifest or submission. Local plugin loading is the supported distribution path.
+Use the default branch instead only when intentionally testing current source.
 
 ## Configure
 
