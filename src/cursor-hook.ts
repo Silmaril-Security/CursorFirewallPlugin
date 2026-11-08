@@ -1,5 +1,11 @@
 import { withClassificationDeadline } from "./classification-deadline.js";
-import { Firewall, HookLabel, type FirewallOptions } from "@silmaril-security/sdk";
+import {
+  Firewall,
+  HookLabel,
+  type ClassifyOptions as SdkClassifyOptions,
+  type FirewallOptions,
+  type GovernanceContext as SdkGovernanceContext,
+} from "@silmaril-security/sdk";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -40,7 +46,7 @@ export { buildLocalProtectionEvent, resolveLocalEventDirectory, writeLocalProtec
 export { configurationPath, resolveRuntimeConfig } from "./runtime-config.js";
 
 export const PLUGIN_NAME = "cursor-firewall-plugin";
-export const PLUGIN_VERSION = "0.3.4";
+export const PLUGIN_VERSION = "0.3.5";
 const MAX_STDIN_BYTES = 4 * 1024 * 1024;
 const SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
 const MAC_DEVICE_NAME_TIMEOUT_MS = 100;
@@ -60,15 +66,13 @@ const MAC_DEVICE_NAME_ARGS = ["--get", "ComputerName"] as const;
 const MAC_DEVICE_NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/;
 
 type ClassificationResult = Record<string, unknown>;
-type GovernanceContext = {
+type LegacyGovernanceContext = {
   agent: "cursor";
-  resource: {
-    kind: "agent" | "tool" | "mcp_server" | "mcp_tool";
-    id: string;
-    parent_id?: string;
-  };
+  resource:
+    | { kind: "mcp_tool"; id: string; parent_id: string }
+    | { kind: "agent" | "tool" | "mcp_server"; id: string };
 };
-type ClassifyOptions = { hook?: string; toolName?: string; metadata?: Record<string, unknown>; requestId?: string; mode?: FirewallMode };
+type ClassifyOptions = Omit<SdkClassifyOptions, "mode"> & { mode?: FirewallMode };
 type FirewallClient = {
   classify(text: string, options?: ClassifyOptions & { signal?: AbortSignal }): Promise<ClassificationResult>;
 };
@@ -79,13 +83,14 @@ type HookOutput = Record<string, unknown>;
 type Target = {
   hookEventName: string;
   text: string;
-  firewallHook: string;
+  firewallHook: HookLabel;
   evidenceHook: ProtectionHook;
   requestId: string;
   sessionId?: string;
   generationId?: string;
   toolName?: string;
   toolUseId?: string;
+  mcpServerName?: string;
   metadata: Record<string, unknown>;
   nativeCapability: "none" | "deny" | "replace_mcp";
 };
@@ -114,6 +119,17 @@ export async function runCursorHook(
   const record = readRecord(input);
   const hookEventName = readString(record?.hook_event_name);
   if (!record || !hookEventName) return undefined;
+
+  const unavailableTarget = buildHostedHttpMcpRedactedTarget(record);
+  if (unavailableTarget) {
+    await emitUnavailableEvidence(unavailableTarget, config, env, deps.evidenceEmitter);
+    debugLog(env, "classification_unavailable", {
+      hookEventName,
+      toolName: unavailableTarget.toolName,
+      reason: "cursor_http_mcp_output_redacted",
+    });
+    return undefined;
+  }
 
   if (hookEventName === "stop") {
     return undefined;
@@ -163,12 +179,14 @@ export async function runCursorHook(
 export function buildCursorTargets(input: HookRecord): Target[] {
   const hookEventName = readString(input.hook_event_name);
   if (!hookEventName) return [];
+  if (isHostedHttpMcpRedactedPostToolUse(input)) return [];
   const sessionId = readString(input.conversation_id);
   const generationId = readString(input.generation_id);
+  const mcpServerName = readString(input.mcp_server_name);
 
   const makeTarget = (
     text: string | undefined,
-    firewallHook: string,
+    firewallHook: HookLabel,
     evidenceHook: ProtectionHook,
     capability: Target["nativeCapability"],
     suffix = "0",
@@ -187,6 +205,7 @@ export function buildCursorTargets(input: HookRecord): Target[] {
       ...(generationId ? { generationId } : {}),
       ...(toolName ? { toolName } : {}),
       ...(toolUseId ? { toolUseId } : {}),
+      ...(mcpServerName ? { mcpServerName } : {}),
       metadata: buildMetadata(input, extraMetadata),
       nativeCapability: capability,
     }];
@@ -201,7 +220,7 @@ export function buildCursorTargets(input: HookRecord): Target[] {
       return makeTarget(readString(input.content), HookLabel.TOOL_RESPONSE, "tool_result", "deny", "0", "Read");
     case "postToolUse": {
       const toolName = readString(input.tool_name);
-      const capability = hasMcpReplacementCapability(toolName ?? "", readString(input.mcp_server_name))
+      const capability = hasMcpReplacementCapability(toolName ?? "", mcpServerName)
         ? "replace_mcp"
         : "none";
       return makeTarget(readTextOrSerialized(input.tool_output), HookLabel.TOOL_RESPONSE, "post_tool", capability);
@@ -218,6 +237,48 @@ export function buildCursorTargets(input: HookRecord): Target[] {
       return makeTarget(readString(input.summary), HookLabel.LLM_OUTPUT, "subagent", "none", "0", undefined, undefined, { source: "subagent_summary" });
     default:
       return [];
+  }
+}
+
+function buildHostedHttpMcpRedactedTarget(input: HookRecord): Target | undefined {
+  if (!isHostedHttpMcpRedactedPostToolUse(input)) return undefined;
+  const toolName = readString(input.tool_name);
+  if (!toolName) return undefined;
+  const sessionId = readString(input.conversation_id);
+  const generationId = readString(input.generation_id);
+  const toolUseId = readString(input.tool_use_id);
+  return {
+    hookEventName: "postToolUse",
+    text: "",
+    firewallHook: HookLabel.TOOL_RESPONSE,
+    evidenceHook: "post_tool",
+    requestId: logicalRequestId(input, "0"),
+    ...(sessionId ? { sessionId } : {}),
+    ...(generationId ? { generationId } : {}),
+    toolName,
+    ...(toolUseId ? { toolUseId } : {}),
+    metadata: buildMetadata(input, { source: "cursor_http_mcp_redacted" }),
+    nativeCapability: "none",
+  };
+}
+
+function isHostedHttpMcpRedactedPostToolUse(input: HookRecord): boolean {
+  if (readString(input.hook_event_name) !== "postToolUse") return false;
+  const toolName = readString(input.tool_name);
+  if (!toolName || !/^MCP:.+$/u.test(toolName)) return false;
+  const output = readHttpMcpMarkerRecord(input.tool_output);
+  if (!output || output.redacted !== true) return false;
+  const keys = Object.keys(output);
+  return keys.every((key) => key === "redacted" || key === "isError")
+    && (output.isError === undefined || typeof output.isError === "boolean");
+}
+
+function readHttpMcpMarkerRecord(value: unknown): HookRecord | undefined {
+  if (typeof value !== "string") return readRecord(value);
+  try {
+    return readRecord(JSON.parse(value));
+  } catch {
+    return undefined;
   }
 }
 
@@ -314,11 +375,36 @@ async function emitEvidence(
   await Promise.resolve(emitter(event, env)).catch(() => undefined);
 }
 
+async function emitUnavailableEvidence(
+  target: Target,
+  config: RuntimeConfig,
+  env: RuntimeEnv,
+  emitter: RuntimeDependencies["evidenceEmitter"],
+): Promise<void> {
+  const mode = effectiveMode({}, config.mode);
+  const event = buildLocalProtectionEvent({
+    pluginName: PLUGIN_NAME,
+    pluginVersion: PLUGIN_VERSION,
+    hook: target.evidenceHook,
+    mode,
+    requestId: target.requestId,
+    ...(target.sessionId ? { sessionId: target.sessionId } : {}),
+    ...(target.toolName ? { toolName: target.toolName } : {}),
+    classification: {},
+    policyDecision: "unavailable",
+    nativeAction: "unavailable",
+    ...(config.mode === "block" ? { blockUnavailable: true } : {}),
+  });
+  await Promise.resolve(emitter(event, env)).catch(() => undefined);
+}
+
 function classifyOptions(target: Target, endpointId?: string): ClassifyOptions {
+  const governance = governanceContext(target);
   return {
     hook: target.firewallHook,
     ...(target.toolName ? { toolName: target.toolName } : {}),
-    metadata: withProvenance(target.metadata, endpointId, governanceContext(target)),
+    governance: sdkGovernanceContext(governance),
+    metadata: withProvenance(target.metadata, endpointId, governance),
     requestId: target.requestId,
   };
 }
@@ -912,7 +998,7 @@ function refreshLeaseArgument(argv: readonly string[]): DeviceNameLease | undefi
 export function withProvenance(
   metadata: Record<string, unknown>,
   endpointId?: string,
-  governance?: GovernanceContext,
+  governance?: LegacyGovernanceContext,
 ): Record<string, unknown> {
   const existingSilmaril = metadata.silmaril && typeof metadata.silmaril === "object" && !Array.isArray(metadata.silmaril)
     ? metadata.silmaril as Record<string, unknown>
@@ -934,8 +1020,8 @@ export function withProvenance(
 }
 
 export function governanceContext(
-  target: Pick<Target, "hookEventName" | "toolName" | "metadata">,
-): GovernanceContext {
+  target: Pick<Target, "hookEventName" | "toolName" | "mcpServerName">,
+): LegacyGovernanceContext {
   if (
     target.hookEventName === "preToolUse"
     || target.hookEventName === "postToolUse"
@@ -943,7 +1029,7 @@ export function governanceContext(
     || target.hookEventName === "beforeReadFile"
   ) {
     const toolName = target.toolName ?? "unknown";
-    const mcp = parseMcpToolName(toolName, readString(target.metadata.mcpServerName));
+    const mcp = parseMcpToolName(toolName, target.mcpServerName);
     return {
       agent: "cursor",
       resource: mcp
@@ -957,12 +1043,21 @@ export function governanceContext(
   };
 }
 
+function sdkGovernanceContext(context: LegacyGovernanceContext): SdkGovernanceContext {
+  const { resource } = context;
+  return {
+    agent: context.agent,
+    resource: resource.kind === "mcp_tool"
+      ? { kind: "mcp_tool", id: resource.id, parentId: resource.parent_id }
+      : { kind: resource.kind, id: resource.id },
+  };
+}
+
 function hasMcpReplacementCapability(
   toolName: string,
   explicitServer: string | undefined,
 ): boolean {
-  return parseMcpToolName(toolName, explicitServer) !== undefined
-    || /^MCP:.+$/u.test(toolName);
+  return parseMcpToolName(toolName, explicitServer) !== undefined;
 }
 
 function parseMcpToolName(
@@ -976,10 +1071,7 @@ function parseMcpToolName(
   if (canonical?.[1] && canonical[2]) {
     return { serverId: canonical[1], toolId: canonical[2] };
   }
-  const cursor = /^MCP:([^:]+):(.+)$/.exec(toolName);
-  return cursor?.[1] && cursor[2]
-    ? { serverId: cursor[1], toolId: cursor[2] }
-    : undefined;
+  return undefined;
 }
 
 function buildMetadata(input: HookRecord, extra: Record<string, unknown>): Record<string, unknown> {

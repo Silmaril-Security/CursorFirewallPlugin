@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.5
+
+- Anchor every native hook command to `CURSOR_PLUGIN_ROOT` while retaining absolute commands in local installations.
+- Treat Cursor Cloud HTTP MCP redacted results as unavailable observations without classifying or claiming replacement.
+- Bundle SDK 0.8.2 and send canonical governed resources alongside compatibility attribution metadata.
+
 ## 0.3.4
 
 - Bundle SDK 0.7.2 so caller cancellation immediately clears attempt timers, including stalled response cleanup after retries.

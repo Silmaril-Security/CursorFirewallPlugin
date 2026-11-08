@@ -82,8 +82,46 @@ test("bundled command hook speaks Cursor JSON over stdio", async () => {
 
     const shadow = await runHook(input, { ...commonEnv, SILMARIL_BLOCK_MALICIOUS: "false" }, hookPath);
     assert.equal(shadow.stdout, "");
-    assert.equal(requests.length, 2);
-    assert.ok(requests.every((payload) => payload.hook === "user_input"));
-    assert.ok(requests.every((payload) => payload.text === "classify through the bundled hook"));
+
+    const mcpInput = JSON.stringify({
+      hook_event_name: "preToolUse",
+      conversation_id: "conversation-cli",
+      generation_id: "generation-cli",
+      tool_name: "mcp__github__fetch",
+      tool_use_id: "tool-use-cli",
+      tool_input: { url: "https://example.test" },
+      workspace_roots: [],
+      cursor_version: "test",
+    });
+    const deniedMcp = await runHook(
+      mcpInput,
+      { ...commonEnv, SILMARIL_BLOCK_MALICIOUS: "true" },
+      hookPath,
+    );
+    assert.equal(JSON.parse(deniedMcp.stdout).permission, "deny");
+
+    assert.equal(requests.length, 3);
+    assert.ok(requests.slice(0, 2).every((payload) => payload.hook === "user_input"));
+    assert.ok(requests.slice(0, 2).every((payload) => payload.text === "classify through the bundled hook"));
+    assert.deepEqual(requests[0].resource, { kind: "agent", id: "cursor" });
+    assert.deepEqual(requests[0].metadata.silmaril.governance, {
+      agent: "cursor",
+      resource: { kind: "agent", id: "cursor" },
+    });
+    assert.deepEqual(requests[2].resource, {
+      kind: "mcp_tool",
+      id: "fetch",
+      parent_id: "github",
+    });
+    assert.deepEqual(requests[2].metadata.silmaril.governance, {
+      agent: "cursor",
+      resource: {
+        kind: "mcp_tool",
+        id: "fetch",
+        parent_id: "github",
+      },
+    });
+    assert.equal(requests[2].metadata.conversationId, "conversation-cli");
+    assert.equal(requests[2].metadata.silmaril.request_id.startsWith("cursor-"), true);
   });
 });
