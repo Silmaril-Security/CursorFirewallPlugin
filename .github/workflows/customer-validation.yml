@@ -1,0 +1,37 @@
+name: Customer package validation
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: customer-package-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ./package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - name: Package the tested customer distribution
+        run: mkdir -p customer-dist && npm pack --ignore-scripts --pack-destination customer-dist
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: customer-package
+          path: ./customer-dist/
+          retention-days: 7
