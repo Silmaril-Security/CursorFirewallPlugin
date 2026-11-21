@@ -128,6 +128,10 @@ npm run install:local
 
 The committed `dist/cursor-hook.js` is rebuilt from TypeScript and bundles the pinned `@silmaril-security/sdk@0.8.2`, so explicit local modes, compatible legacy response modes, canonical governance resources, and governance decisions are preserved and users do not need to install dependencies after cloning a release.
 
+## Release acceptance
+
+The release job installs the exact tagged source candidate under a fresh home on the dedicated `silmaril-macstadium-gui` runner. It uses Cursor CLI `2026.11.19-f005e9d` in read-only Ask mode. Provision the dedicated QA account's `CUSTOMER_CURSOR_API_KEY` and Test Tenant endpoint and key. The job asks the real agent to read a randomly named note, verifies its reply contains an unprompted value from that note, and checks the installed plugin's prompt, tool-call and tool-result classifications in the same session. It runs once against loopback and once against the Test Tenant. A separate controlled read-deny case applies a deterministic governance rule to a harmless local filename, requires the installed pre-tool block decision, and checks that the client returns the rule denial without returning the file value. A missing credential or host permission leaves the release unpublished.
+
 ## Security and license
 
 Report vulnerabilities through GitHub private vulnerability reporting. See [SECURITY.md](SECURITY.md). The plugin is licensed under Apache-2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE).

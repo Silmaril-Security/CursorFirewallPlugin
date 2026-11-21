@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { lstat, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { execFileSync, spawn } from "node:child_process";
+import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -32,6 +32,21 @@ function runPackagedCommand(command, input, options) {
     child.stdin.end(JSON.stringify(input));
   });
 }
+
+test("running the installer through a directory alias installs the packaged hook", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-cli-install-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const alias = path.join(root, "checkout");
+  await symlink(sourceRoot, alias, "dir");
+  execFileSync(process.execPath, [path.join(alias, "scripts", "install-local.mjs")], {
+    env: { ...process.env, HOME: root, USERPROFILE: root },
+  });
+  const installed = path.join(root, ".cursor", "plugins", "local", "silmaril-firewall");
+  assert.deepEqual(
+    await readFile(path.join(installed, "dist", "cursor-hook.js")),
+    await readFile(path.join(sourceRoot, "dist", "cursor-hook.js")),
+  );
+});
 
 test("local installer creates a lean non-symlinked Cursor plugin", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-install-"));

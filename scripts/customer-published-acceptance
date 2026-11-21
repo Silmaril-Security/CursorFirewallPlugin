@@ -1,0 +1,420 @@
+#!/usr/bin/env node
+// Customer journey for the Cursor Firewall plugin release archive (git archive tar.gz, source/ prefix).
+//
+// Inputs from the shared release-acceptance action: CUSTOMER_ARTIFACT, CUSTOMER_ARTIFACT_SHA256,
+// CUSTOMER_SOURCE_SHA, CUSTOMER_VERSION, CUSTOMER_ARCHIVE_HELPER and CUSTOMER_RESULT, plus the caller's
+// CUSTOMER_NATIVE_API_URL / CUSTOMER_NATIVE_API_KEY (live Cascade) and CUSTOMER_CURSOR_API_KEY (the
+// dedicated QA Cursor identity, never a personal account). CURSOR_AGENT_BIN optionally names the host.
+//
+// The archive is verified, staged with the shared helper, and then, under the physical-Mac lease,
+// installed with the product's own lean installer into an isolated HOME. A real Cursor CLI turn runs
+// a read-only file lookup carrying a random trace with the installed plugin loaded. The turn is
+// observed twice: through a loopback classifier (native) and through a recording pass-through to the
+// customer Cascade (live). The separate policy denial must reach the real client. CUSTOMER_RESULT contains only scenario statuses.
+import { spawn, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Pinned Cursor CLI host. Any other version is not accepted as evidence.
+const AGENT_VERSION = "2026.11.19-f005e9d";
+const PLUGIN_DIRECTORY = "silmaril-firewall";
+const PORTABLE_HOOK = 'node "$CURSOR_PLUGIN_ROOT/dist/cursor-hook.js"';
+const LEASE_BLOCKED = 75;
+const TURN_TIMEOUT_MS = 10 * 60_000;
+const scriptsDirectory = path.dirname(fileURLToPath(import.meta.url));
+
+const results = { install: "BLOCKED", native: "BLOCKED", live: "BLOCKED", policy_denial: "BLOCKED" };
+const resultPath = process.env.CUSTOMER_RESULT ? path.resolve(process.env.CUSTOMER_RESULT) : undefined;
+
+function say(message) {
+  process.stderr.write(`customer-published-acceptance: ${message}\n`);
+}
+
+function publish() {
+  const temporary = `${resultPath}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(results)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, resultPath);
+}
+
+function exitCode() {
+  const statuses = Object.values(results);
+  return statuses.every((status) => status === "PASS") ? 0 : statuses.includes("FAIL") ? 1 : 3;
+}
+
+function sha256(file) {
+  const hash = crypto.createHash("sha256");
+  const fd = fs.openSync(file, "r");
+  try {
+    const chunk = Buffer.alloc(1 << 20);
+    for (let n; (n = fs.readSync(fd, chunk, 0, chunk.length, null)) > 0;) hash.update(chunk.subarray(0, n));
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest("hex");
+}
+
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+
+// Environment for child processes: nothing from the caller beyond what a host needs to run and reach the network.
+function childEnvironment(home, extra = {}) {
+  const env = { PATH: [path.dirname(process.execPath), process.env.PATH || ""].join(path.delimiter), HOME: home };
+  for (const name of ["LANG", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS"]) {
+    if (process.env[name] !== undefined) env[name] = process.env[name];
+  }
+  return { ...env, ...extra };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Parent: verify identity and bytes, stage the archive, then run the leased phase.
+// ---------------------------------------------------------------------------------------------
+function verifyAndStage(work) {
+  const { CUSTOMER_ARTIFACT: artifact, CUSTOMER_ARTIFACT_SHA256: digest, CUSTOMER_SOURCE_SHA: sourceSha,
+    CUSTOMER_VERSION: version, CUSTOMER_ARCHIVE_HELPER: helper } = process.env;
+  if (!artifact || !digest || !sourceSha || !version || !helper) {
+    say("missing CUSTOMER_ARTIFACT, CUSTOMER_ARTIFACT_SHA256, CUSTOMER_SOURCE_SHA, CUSTOMER_VERSION or CUSTOMER_ARCHIVE_HELPER");
+    return undefined;
+  }
+  if (!path.isAbsolute(artifact) || !/^[0-9a-f]{64}$/.test(digest) || !/^[0-9a-f]{40}$/.test(sourceSha)
+      || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
+    results.install = "FAIL";
+    say("malformed customer identity input");
+    return undefined;
+  }
+  if (!fs.statSync(artifact, { throwIfNoEntry: false })?.isFile()) {
+    results.install = "FAIL";
+    say("CUSTOMER_ARTIFACT is not a file");
+    return undefined;
+  }
+  if (sha256(artifact) !== digest) {
+    results.install = "FAIL";
+    say("artifact digest mismatch");
+    return undefined;
+  }
+  // git archive records its commit in the pax comment. The commit must match; the digest binds the rest.
+  const commit = spawnSync("python3", ["-c",
+    "import sys,tarfile\nt=tarfile.open(sys.argv[1],'r|gz')\nt.next()\nprint(t.pax_headers.get('comment',''))", artifact],
+  { encoding: "utf8" });
+  if (commit.status !== 0 || commit.stdout.trim() !== sourceSha) {
+    results.install = "FAIL";
+    say("artifact is unreadable or its archived commit does not match CUSTOMER_SOURCE_SHA");
+    return undefined;
+  }
+  const source = path.join(work, "source");
+  if (spawnSync("python3", [helper, artifact, source, "--prefix", "source"], { stdio: "ignore" }).status !== 0) {
+    results.install = "FAIL";
+    say("archive helper rejected the artifact");
+    return undefined;
+  }
+  try {
+    if (readJson(path.join(source, "package.json")).version !== version
+        || readJson(path.join(source, ".cursor-plugin", "plugin.json")).version !== version) throw new Error("version");
+  } catch {
+    results.install = "FAIL";
+    say("package or plugin version does not match CUSTOMER_VERSION");
+    return undefined;
+  }
+  return source;
+}
+
+function runLeased(source) {
+  // The whole physical-host phase runs in a child that holds the shared Mac lease until it exits.
+  const wrapper = [
+    "import subprocess, sys",
+    "sys.path.insert(0, sys.argv[1])",
+    "from macos_release_lease import PhysicalHostUnavailable, physical_lease",
+    "try:",
+    "    with physical_lease():",
+    "        code = subprocess.call(sys.argv[2:])",
+    "except PhysicalHostUnavailable as error:",
+    "    print('customer-published-acceptance: ' + str(error), file=sys.stderr)",
+    `    code = ${LEASE_BLOCKED}`,
+    "sys.exit(code)",
+  ].join("\n");
+  const child = spawnSync("python3", ["-c", wrapper, scriptsDirectory, process.execPath,
+    fileURLToPath(import.meta.url), "--leased", source], { stdio: "inherit" });
+  let observed;
+  try {
+    observed = readJson(resultPath);
+  } catch {
+    observed = undefined;
+  }
+  for (const name of Object.keys(results)) {
+    const value = observed?.[name];
+    if (value === "PASS" || value === "FAIL" || value === "BLOCKED") results[name] = value;
+  }
+  // A crash or signal in the leased phase is a failure, not a deliberate block.
+  if (![0, 1, 3, LEASE_BLOCKED].includes(child.status)) {
+    for (const name of Object.keys(results)) if (results[name] !== "PASS") results[name] = "FAIL";
+  }
+}
+
+async function parent() {
+  publish();
+  const work = fs.realpathSync(fs.mkdtempSync(path.join(fs.realpathSync(process.env.RUNNER_TEMP || os.tmpdir()), "customer-cursor-")));
+  try {
+    const source = verifyAndStage(work);
+    publish();
+    if (source) runLeased(source);
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+    publish();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Leased child: real install, byte comparison, and real Cursor CLI turns.
+// ---------------------------------------------------------------------------------------------
+function listFiles(root, relative = "") {
+  const entries = [];
+  for (const entry of fs.readdirSync(path.join(root, relative), { withFileTypes: true })) {
+    const next = path.join(relative, entry.name);
+    if (entry.isSymbolicLink()) throw new Error("symbolic link in plugin");
+    if (entry.isDirectory()) entries.push(...listFiles(root, next));
+    else if (entry.isFile()) entries.push(next);
+  }
+  return entries;
+}
+
+// The installed runtime must be exactly the packed file set, byte for byte; only the hook commands are rewritten.
+function installedMatchesPacked(source, installed) {
+  const manifest = readJson(path.join(source, "package.json"));
+  const packed = [];
+  for (const entry of ["package.json", ...manifest.files]) {
+    packed.push(...(fs.statSync(path.join(source, entry)).isDirectory() ? listFiles(source, entry) : [entry]));
+  }
+  const actual = listFiles(installed);
+  if (packed.length !== actual.length || !packed.every((file) => actual.includes(file))) return false;
+  const hookFile = path.join("hooks", "hooks.json");
+  const hookCommand = `node '${path.join(installed, "dist", "cursor-hook.js")}'`;
+  return packed.every((file) => {
+    if (file !== hookFile) return fs.readFileSync(path.join(source, file)).equals(fs.readFileSync(path.join(installed, file)));
+    const restored = fs.readFileSync(path.join(installed, file), "utf8").replaceAll(hookCommand, PORTABLE_HOOK.replaceAll('"', '\\"'));
+    return JSON.stringify(JSON.parse(restored)) === JSON.stringify(readJson(path.join(source, file)));
+  });
+}
+
+function pinnedAgent(home) {
+  const real = process.env.HOME || os.homedir();
+  const names = ["agent", "cursor-agent"];
+  const found = process.env.CURSOR_AGENT_BIN
+    ? [process.env.CURSOR_AGENT_BIN]
+    : [...(process.env.PATH || "").split(path.delimiter), path.join(real, ".local", "bin")]
+      .filter(Boolean).flatMap((directory) => names.map((name) => path.join(directory, name)));
+  for (const candidate of found) {
+    if (!path.isAbsolute(candidate) || !fs.statSync(candidate, { throwIfNoEntry: false })?.isFile()) continue;
+    const probe = spawnSync(candidate, ["--version"], { encoding: "utf8", env: childEnvironment(home), timeout: 30_000 });
+    if (probe.status === 0 && probe.stdout.trim() === AGENT_VERSION) return candidate;
+  }
+  return undefined;
+}
+
+// Loopback classifier that records what the installed plugin really sent. With an upstream it forwards the
+// request unchanged (the credential is added here, never written to the plugin config) and records the result.
+function startRecorder(upstream, upstreamKey, trace, denyRead, fileWord) {
+  const seen = [];
+  const server = http.createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", async () => {
+      let payload;
+      let status = 200;
+      let body = JSON.stringify({ prediction: "BENIGN", score: 0.01, threshold: 0.5 });
+      try {
+        const raw = Buffer.concat(chunks).toString("utf8");
+        payload = JSON.parse(raw);
+        const deny = denyRead && payload.hook === "tool_call" && payload.text?.includes(trace);
+        if (deny) body = JSON.stringify({ prediction: "BENIGN", score: 0.01, threshold: 0.5,
+          governance: { action: "block", rule_id: "qa-read-policy", policy_version: "1" } });
+        if (upstream) {
+          const forwarded = await fetch(upstream, {
+            method: "POST", redirect: "error", body: raw, signal: AbortSignal.timeout(8_000),
+            headers: { "x-api-key": upstreamKey, "content-type": "application/json" },
+          });
+          status = forwarded.status;
+          body = await forwarded.text();
+        }
+        let prediction;
+        try {
+          prediction = JSON.parse(body).prediction;
+        } catch { /* not a classification */ }
+        seen.push({
+          hook: payload.hook, trace: typeof payload.text === "string" && payload.text.includes(trace),
+          deny, containsWord: payload.text?.includes(fileWord) === true,
+          ok: status >= 200 && status < 300, prediction: typeof prediction === "string" ? prediction : undefined,
+        });
+      } catch {
+        status = 502;
+        body = "{}";
+      }
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(body);
+    });
+  });
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({
+    seen, url: `http://127.0.0.1:${server.address().port}/`, close: () => new Promise((done) => server.close(done)),
+  })));
+}
+
+function runAgent(agent, { home, workspace, installed, prompt, log }) {
+  return new Promise((resolve) => {
+    const child = spawn(agent, ["-p", "--output-format", "json", "--mode", "ask", "--workspace", workspace,
+      "--plugin-dir", installed, prompt], {
+      cwd: workspace, stdio: ["ignore", "pipe", "pipe"],
+      env: childEnvironment(home, { CURSOR_API_KEY: process.env.CUSTOMER_CURSOR_API_KEY, NO_COLOR: "1" }),
+    });
+    const output = fs.createWriteStream(log, { mode: 0o600 });
+    child.stdout.pipe(output, { end: false });
+    child.stderr.resume();
+    const timer = setTimeout(() => child.kill("SIGKILL"), TURN_TIMEOUT_MS);
+    child.once("error", () => {}); // spawn failure also emits close
+    child.once("close", (code) => { clearTimeout(timer); output.end(() => resolve(code)); });
+  });
+}
+
+// The plugin's own evidence spool is the structural record: all three hooks, one conversation, the installed version.
+function evidenceComplete(home, version, denied) {
+  const directory = path.join(home, "Library", "Application Support", "Silmaril", "Evidence", "incoming");
+  let events;
+  try {
+    events = fs.readdirSync(directory).filter((name) => /^event-.*\.json$/.test(name)).map((name) => readJson(path.join(directory, name)));
+  } catch {
+    return false;
+  }
+  const verified = events.filter((e) => e.host === "cursor" && e.provenance?.pluginVersion === version
+    && e.mode === "block" && e.prediction === "benign" && e.sessionFingerprint);
+  const prompts = verified.filter((e) => e.hook === "user_input" && e.nativeAction === "allowed");
+  return prompts.some((prompt) => {
+    const session = verified.filter((e) => e.sessionFingerprint === prompt.sessionFingerprint);
+    if (denied) return session.some((e) => e.hook === "pre_tool" && e.policyDecision === "block"
+      && e.nativeAction === "block_returned");
+    return ["pre_tool", "post_tool"].every((hook) => session.some((e) => e.hook === hook
+      && e.policyDecision === "allow" && e.nativeAction === "allowed"));
+  });
+}
+
+export function denialVisible(observations, response, fileWord) {
+  const deniedCall = observations.some((r) => r.hook === "tool_call" && r.trace && r.deny && r.ok);
+  const disclosed = observations.some((r) => r.hook === "tool_response" && r.containsWord);
+  return deniedCall && !disclosed && !response.includes(fileWord)
+    && response.includes("Silmaril Firewall blocked potentially malicious content.");
+}
+
+// One real turn through the installed plugin. Returns PASS or FAIL; prerequisites are decided by the caller.
+async function observeTurn(agent, { home, installed, work, version, kind, upstream, upstreamKey }) {
+  const trace = `silmaril-trace-${crypto.randomBytes(12).toString("hex")}`;
+  const workspace = fs.mkdtempSync(path.join(work, `${kind}-workspace-`));
+  fs.rmSync(path.join(home, "Library", "Application Support", "Silmaril", "Evidence", "incoming"), { recursive: true, force: true });
+  const secretWord = crypto.randomBytes(16).toString("hex");
+  const denied = kind === "denial";
+  const recorder = await startRecorder(upstream, upstreamKey, trace, denied, secretWord);
+  try {
+    fs.writeFileSync(path.join(home, ".cursor", "silmaril-firewall.json"), `${JSON.stringify({
+      enabled: true, apiUrl: recorder.url, apiKey: crypto.randomBytes(16).toString("hex"), mode: "block", timeoutMs: 5000,
+    })}\n`, { mode: 0o600 });
+    const filename = `note-${trace}.txt`;
+    fs.writeFileSync(path.join(workspace, filename), `${trace} ${secretWord}\n`, { mode: 0o600 });
+    const log = path.join(work, `${kind}-agent.json`);
+    const code = await runAgent(agent, {
+      home, workspace, installed, log,
+      prompt: `Read the local file ${filename} and reply with the two words it contains. Use the read tool only. If the read is denied, stop and quote the reason verbatim.`,
+    });
+    let reply;
+    try { reply = readJson(log); } catch { /* incomplete agent result */ }
+    const hooks = ["user_input", "tool_call", "tool_response"];
+    const correlated = hooks.every((hook) => recorder.seen.some((r) => r.hook === hook && r.trace && r.ok && r.prediction?.toUpperCase() === "BENIGN"));
+    const completed = code === 0 && reply?.type === "result" && reply?.is_error === false && typeof reply.result === "string";
+    if (completed && evidenceComplete(home, version, denied)) {
+      if (!denied && reply.result.includes(secretWord) && correlated) return "PASS";
+      if (denied && denialVisible(recorder.seen, reply.result, secretWord)) return "PASS";
+    }
+    say(`${kind} turn was not observed through the installed plugin (agent exit ${code ?? "none"}, `
+      + `${recorder.seen.length} classifications)`);
+    return "FAIL";
+  } finally {
+    await recorder.close();
+  }
+}
+
+async function leased(source) {
+  const version = process.env.CUSTOMER_VERSION;
+  const work = fs.realpathSync(fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "cursor-acceptance-")));
+  try {
+    const home = path.join(work, "home");
+    fs.mkdirSync(path.join(home, ".cursor"), { recursive: true, mode: 0o700 });
+    const install = spawnSync(process.execPath, [path.join(source, "scripts", "install-local.mjs")], {
+      cwd: source, env: childEnvironment(home), stdio: "ignore", timeout: 120_000,
+    });
+    const installed = path.join(home, ".cursor", "plugins", "local", PLUGIN_DIRECTORY);
+    let matches = false;
+    try {
+      matches = install.status === 0 && installedMatchesPacked(source, installed);
+    } catch { /* an unreadable install is a failed install */ }
+    results.install = matches ? "PASS" : "FAIL";
+    publish();
+    if (!matches) {
+      say("installed runtime does not match the packed bytes");
+      return;
+    }
+
+    const agent = pinnedAgent(home);
+    const qaKey = process.env.CUSTOMER_CURSOR_API_KEY;
+    if (!agent) say(`native and live blocked: pinned Cursor CLI ${AGENT_VERSION} is not available (set CURSOR_AGENT_BIN)`);
+    else if (!qaKey) say("native and live blocked: CUSTOMER_CURSOR_API_KEY (dedicated QA identity) is not set");
+    if (!agent || !qaKey) return;
+
+    const context = { home, installed, work, version };
+    results.native = await observeTurn(agent, { ...context, kind: "native" });
+    results.policy_denial = await observeTurn(agent, { ...context, kind: "denial" });
+    publish();
+
+    const { CUSTOMER_NATIVE_API_URL: url, CUSTOMER_NATIVE_API_KEY: key } = process.env;
+    if (!url || !key) {
+      say("live blocked: CUSTOMER_NATIVE_API_URL and CUSTOMER_NATIVE_API_KEY are not set");
+      return;
+    }
+    let https = false;
+    try {
+      https = new URL(url).protocol === "https:";
+    } catch { /* malformed */ }
+    if (!https) {
+      results.live = "FAIL";
+      say("live failed: CUSTOMER_NATIVE_API_URL is not an https URL");
+      return;
+    }
+    results.live = await observeTurn(agent, { ...context, kind: "live", upstream: url, upstreamKey: key });
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+}
+
+async function main() {
+  if (!resultPath) {
+    say("CUSTOMER_RESULT is required");
+    process.exitCode = 2;
+    return;
+  }
+  const leasedSource = process.argv[2] === "--leased" ? process.argv[3] : undefined;
+  try {
+    if (leasedSource) {
+      results.install = results.native = results.live = "BLOCKED";
+      await leased(path.resolve(leasedSource));
+    } else {
+      await parent();
+    }
+  } catch (error) {
+    // An unexpected driver fault never leaves a status that was not observed as PASS.
+    say(error?.message ? error.message : "unexpected failure");
+    for (const name of Object.keys(results)) if (results[name] !== "PASS") results[name] = "FAIL";
+  } finally {
+    publish();
+    process.exitCode = exitCode();
+  }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

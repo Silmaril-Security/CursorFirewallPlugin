@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -100,12 +100,13 @@ async function exists(candidate) {
   }
 }
 
-function isDirectInvocation() {
-  return Boolean(process.argv[1])
-    && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+async function isDirectInvocation() {
+  if (typeof import.meta.main === "boolean") return import.meta.main;
+  if (!process.argv[1] || !await exists(process.argv[1])) return false;
+  return await realpath(process.argv[1]) === await realpath(fileURLToPath(import.meta.url));
 }
 
-if (isDirectInvocation()) {
+if (await isDirectInvocation()) {
   const destination = await installLocalPlugin();
   process.stdout.write(`Installed Silmaril Firewall at ${destination}\n`);
 }
