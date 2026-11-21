@@ -38,13 +38,26 @@ test("a wrong digest or malformed identity never reports a pass", () => {
         CUSTOMER_ARCHIVE_HELPER: path.join(directory, "unused-helper.py"), ...identity,
       };
     });
-    assert.deepEqual(result, { install: "FAIL", native: "BLOCKED", live: "BLOCKED" });
+    assert.deepEqual(result, { install: "FAIL", native: "BLOCKED", live: "BLOCKED", policy_denial: "BLOCKED" });
     assert.equal(child.status, 1);
   }
 });
 
 test("a real lean install without QA or live credentials leaves native and live blocked", () => {
   const { child, result } = drive(["--leased", root], () => ({ CUSTOMER_VERSION: version }));
-  assert.deepEqual(result, { install: "PASS", native: "BLOCKED", live: "BLOCKED" });
+  assert.deepEqual(result, { install: "PASS", native: "BLOCKED", live: "BLOCKED", policy_denial: "BLOCKED" });
   assert.equal(child.status, 3);
+});
+
+
+test("the client denial requires the actual rule decision and withholds the unprompted file value", async () => {
+  const { denialVisible } = await import("../scripts/customer-published-acceptance");
+  const denied = { hook: "tool_call", trace: true, deny: true, ok: true };
+  const notice = "Silmaril Firewall blocked potentially malicious content.";
+  const word = "test-only-file-value";
+  assert.equal(denialVisible([denied], notice, word), true);
+  assert.equal(denialVisible([], notice, word), false);
+  assert.equal(denialVisible([denied], "", word), false);
+  assert.equal(denialVisible([denied], notice + word, word), false);
+  assert.equal(denialVisible([denied, { hook: "tool_response", containsWord: true }], notice, word), false);
 });
