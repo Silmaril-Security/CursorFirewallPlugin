@@ -383,7 +383,18 @@ export function missingAllowCallbacks(observations, hooks = ["user_input", "tool
     !observations.some((r) => r.hook === hook && r.trace && r.ok && r.prediction?.toUpperCase() === "BENIGN"));
 }
 
-// One real turn through the installed plugin. Returns PASS or FAIL; prerequisites are decided by the caller.
+export function interruptedAfterPolicyCheck({ code, diagnostic, outputBytes, complete, missing, denied, observations }) {
+  if (code !== 1 || outputBytes !== 0 || !complete || missing.length
+      || !/Connection lost, reconnecting to [^\r\n]+ \(attempt [1-9]\d*\)/i.test(diagnostic)) return false;
+  if (!observations.every((r) => r.ok && r.prediction?.toUpperCase() === "BENIGN")) return false;
+  if (denied) {
+    return observations.some((r) => r.hook === "tool_call" && r.trace && r.deny)
+      && !observations.some((r) => r.hook === "tool_response" && r.containsWord);
+  }
+  return observations.some((r) => r.hook === "tool_response" && r.trace && r.containsWord);
+}
+
+// One real client turn in a private workspace with a fresh note and recorder.
 async function observeTurn(agent, { home, env, installed, work, version, kind, upstream, upstreamKey }) {
   const trace = `silmaril-trace-${crypto.randomBytes(12).toString("hex")}`;
   const workspace = fs.mkdtempSync(path.join(work, `${kind}-workspace-`));
@@ -422,10 +433,20 @@ async function observeTurn(agent, { home, env, installed, work, version, kind, u
     const reason = code === 0 ? "" : `, ${cursorFailureReason(diagnostic || String(reply?.error || reply?.result || ""))}`;
     say(`${kind} turn was not observed through the installed plugin (agent exit ${code ?? "none"}, `
       + `${recorder.seen.length} classifications${reason})`);
+    if (interruptedAfterPolicyCheck({ code, diagnostic, outputBytes: fs.statSync(log).size,
+      complete, missing, denied, observations: recorder.seen })) return "INTERRUPTED";
     return "FAIL";
   } finally {
     await recorder.close();
   }
+}
+
+export async function verifyTurn(agent, options, run = observeTurn) {
+  const first = await run(agent, options);
+  if (first !== "INTERRUPTED") return first;
+  say(`${options.kind}: Cursor lost its connection after the policy checks. Retrying once with a fresh note.`);
+  const second = await run(agent, options);
+  return second === "INTERRUPTED" ? "FAIL" : second;
 }
 
 async function leased(source) {
@@ -456,8 +477,8 @@ async function leased(source) {
     if (!env) return;
 
     const context = { home, env, installed, work, version };
-    results.native = await observeTurn(agent, { ...context, kind: "native" });
-    results.policy_denial = await observeTurn(agent, { ...context, kind: "denial" });
+    results.native = await verifyTurn(agent, { ...context, kind: "native" });
+    results.policy_denial = await verifyTurn(agent, { ...context, kind: "denial" });
     publish();
 
     const { CUSTOMER_NATIVE_API_URL: url, CUSTOMER_NATIVE_API_KEY: key } = process.env;
@@ -474,7 +495,7 @@ async function leased(source) {
       say("live failed: CUSTOMER_NATIVE_API_URL is not an https URL");
       return;
     }
-    results.live = await observeTurn(agent, { ...context, kind: "live", upstream: url, upstreamKey: key });
+    results.live = await verifyTurn(agent, { ...context, kind: "live", upstream: url, upstreamKey: key });
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
   }

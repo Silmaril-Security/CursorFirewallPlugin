@@ -196,3 +196,27 @@ test("the pinned CLI may omit only prompt coverage from a completed read or deni
   assert.equal(passes(assess([event("pre_tool", true)], [callbacks[0]], true)), true);
   assert.equal(passes(assess(events, [callbacks[0]], true)), false);
 });
+
+test("only a disconnected turn with verified policy effects and no client output can retry", async () => {
+  const { interruptedAfterPolicyCheck, verifyTurn } = await import("../scripts/customer-published-acceptance");
+  const call = { hook: "tool_call", trace: true, deny: true, ok: true, prediction: "BENIGN" };
+  const result = { ...call, hook: "tool_response", deny: false, containsWord: true };
+  const turn = { code: 1, diagnostic: "Connection lost, reconnecting to the provider (attempt 3)...",
+    complete: true, missing: [], denied: false, outputBytes: 0, observations: [result] };
+  assert.equal(interruptedAfterPolicyCheck(turn), true);
+  for (const change of [{ code: 0 }, { complete: false }, { missing: ["tool_call"] }, { outputBytes: 1 },
+    { diagnostic: "Forbidden" }, { observations: [{ ...result, ok: false }] }, { observations: [call] }]) {
+    assert.equal(interruptedAfterPolicyCheck({ ...turn, ...change }), false);
+  }
+  assert.equal(interruptedAfterPolicyCheck({ ...turn, denied: true, observations: [call] }), true);
+  assert.equal(interruptedAfterPolicyCheck({ ...turn, denied: true, observations: [call, result] }), false);
+  for (const [attempts, expected, count] of [
+    [["FAIL", "PASS"], "FAIL", 1], [["PASS"], "PASS", 1],
+    [["INTERRUPTED", "PASS"], "PASS", 2], [["INTERRUPTED", "FAIL"], "FAIL", 2],
+    [["INTERRUPTED", "INTERRUPTED", "PASS"], "FAIL", 2],
+  ]) {
+    let used = 0;
+    assert.equal(await verifyTurn(null, { kind: "native" }, async () => attempts[used++]), expected);
+    assert.equal(used, count);
+  }
+});
