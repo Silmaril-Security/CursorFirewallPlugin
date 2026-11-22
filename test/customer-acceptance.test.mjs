@@ -78,3 +78,55 @@ test("private diagnostics retain only the last 8192 bytes across UTF-8 chunks", 
   assert.equal(tail.length, 8192);
   assert.deepEqual(diagnosticTail(tail, Buffer.from("end")), Buffer.concat([chunk, Buffer.from("end")]).subarray(-8192));
 });
+
+test("only the operator-designated Cursor login may drive the isolated plugin", async (t) => {
+  const { agentEnvironment } = await import("../scripts/customer-published-acceptance");
+  const fs = (await import("node:fs")).default;
+  const home = mkdtempSync(path.join(os.tmpdir(), "qa-login-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const agent = path.join(home, "agent");
+  const email = "qa@example.test";
+  const descriptor = "/Users/Shared/silmaril-release-qa/cursor-qa-identity.json";
+  const oldKey = process.env.CUSTOMER_CURSOR_API_KEY;
+  t.after(() => {
+    if (oldKey === undefined) delete process.env.CUSTOMER_CURSOR_API_KEY;
+    else process.env.CUSTOMER_CURSOR_API_KEY = oldKey;
+  });
+  delete process.env.CUSTOMER_CURSOR_API_KEY;
+  t.mock.method(fs, "existsSync", (file) => file === descriptor);
+  let mode = 0o644;
+  let owner = 0;
+  t.mock.method(fs, "lstatSync", (file) => ({ uid: owner, mode,
+    isFile: () => file === descriptor, isDirectory: () => file === path.dirname(descriptor) }));
+  let consoleUid = 502;
+  t.mock.method(fs, "statSync", () => ({ uid: consoleUid }));
+  t.mock.method(os, "userInfo", () => ({ uid: 502, username: "qa", homedir: "/Users/qa" }));
+  t.mock.method(fs, "readFileSync", () => JSON.stringify({ account: "qa", email }));
+  function identity(authenticated, address) {
+    writeFileSync(agent, "#!/bin/sh\nprintf '%s' '" + JSON.stringify({
+      isAuthenticated: authenticated, userInfo: { email: address },
+    }) + "'\n", { mode: 0o700 });
+  }
+  identity(true, email);
+  const env = agentEnvironment(agent, home);
+  assert.equal(env.HOME, "/Users/qa");
+  assert.equal(env.CURSOR_CONFIG_DIR, path.join(home, ".cursor"));
+  assert.ok(env.SILMARIL_CONFIG_PATH.startsWith(home + path.sep));
+  assert.ok(env.SILMARIL_LOCAL_EVENT_DIR.startsWith(home + path.sep));
+  for (const [auth, address] of [[true, "other@example.test"], [false, email]]) {
+    identity(auth, address);
+    assert.equal(agentEnvironment(agent, home), undefined);
+  }
+  identity(true, email);
+  consoleUid = 501;
+  assert.equal(agentEnvironment(agent, home), undefined);
+  consoleUid = 502;
+  mode = 0o666;
+  assert.equal(agentEnvironment(agent, home), undefined);
+  mode = 0o644;
+  owner = 502;
+  assert.equal(agentEnvironment(agent, home), undefined);
+  process.env.CUSTOMER_CURSOR_API_KEY = "test-only";
+  assert.equal(agentEnvironment(agent, home).HOME, home);
+  assert.equal(agentEnvironment(agent, home).CURSOR_API_KEY, "test-only");
+});

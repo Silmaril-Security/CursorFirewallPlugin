@@ -286,7 +286,7 @@ export function diagnosticTail(previous, chunk) {
   return Buffer.concat([previous.subarray(Math.max(0, previous.length + end.length - limit)), end]);
 }
 
-function agentEnvironment(agent, home) {
+export function agentEnvironment(agent, home) {
   const key = process.env.CUSTOMER_CURSOR_API_KEY;
   if (key) return childEnvironment(home, { CURSOR_API_KEY: key, NO_COLOR: "1" });
   // Only a lab operator can designate an Aqua login for recurring acceptance.
