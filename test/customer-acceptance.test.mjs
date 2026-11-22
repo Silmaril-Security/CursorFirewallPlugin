@@ -167,3 +167,32 @@ test("discovers the exact Cursor release after auto-update and respects explicit
   rmSync(pinned);
   assert.equal(pinnedAgent(home, environment), launcher);
 });
+
+test("the pinned CLI may omit only prompt coverage from a completed read or denial", async () => {
+  const { assessTurnEvidence } = await import("../scripts/customer-published-acceptance");
+  const pin = "2026.11.19-f005e9d";
+  const callback = (hook) => ({ hook, session: "this-turn", trace: true, ok: true, prediction: "BENIGN" });
+  const event = (hook, denied = false) => ({
+    hook, host: "cursor", provenance: { pluginVersion: version }, sessionFingerprint: "this-turn",
+    mode: "block", prediction: "benign", policyDecision: denied ? "block" : "allow",
+    nativeAction: denied ? "block_returned" : "allowed",
+  });
+  const callbacks = [callback("tool_call"), callback("tool_response")];
+  const events = [event("pre_tool"), event("post_tool")];
+  const assess = (records, requests, denied = false, cli = pin) => assessTurnEvidence(records, requests, version, denied, cli);
+  const passes = (result) => result.complete && result.missing.length === 0;
+  assert.deepEqual(assess(events, callbacks), { complete: true, missing: [], requirePrompt: false });
+  assert.equal(passes(assess(events, callbacks, false, "new-cli")), false);
+  assert.equal(passes(assess(events, callbacks.slice(0, 1))), false);
+  assert.equal(passes(assess([events[0], { ...events[1], sessionFingerprint: "unrelated" }], callbacks)), false);
+  assert.equal(passes(assess(events, [callbacks[0], { ...callbacks[1], session: "unrelated" }])), false);
+  assert.equal(passes(assess(events, [...callbacks, { ...callbacks[0], session: "second-read" }])), false);
+  assert.equal(passes(assess(events, callbacks.map((entry) => ({ ...entry, session: undefined })))), false);
+  assert.equal(passes(assess(events, [...callbacks, callback("user_input")])), false);
+  assert.equal(passes(assess([...events, event("user_input")], callbacks)), false);
+  const promptEvents = [...events, event("user_input")];
+  assert.equal(passes(assess(promptEvents, [...callbacks, { ...callback("user_input"), ok: false }])), false);
+  assert.equal(passes(assess(promptEvents, [...callbacks, callback("user_input")], false, "new-cli")), true);
+  assert.equal(passes(assess([event("pre_tool", true)], [callbacks[0]], true)), true);
+  assert.equal(passes(assess(events, [callbacks[0]], true)), false);
+});
