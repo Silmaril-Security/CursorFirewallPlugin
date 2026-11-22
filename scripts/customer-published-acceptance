@@ -261,6 +261,24 @@ function startRecorder(upstream, upstreamKey, trace, denyRead, fileWord) {
   })));
 }
 
+// Only these fixed labels may enter a public receipt log. Vendor diagnostics can contain credentials,
+// model replies, paths, and the whole prompt.
+export function cursorFailureReason(message) {
+  const categories = [
+    [/workspace trust|untrusted workspace/i, "workspace trust required"],
+    [/invalid.*(?:api key|token)|(?:key|token).*invalid|unauthenticated|authentication required|unauthorized|401/i, "authentication rejected"],
+    [/permission denied|forbidden|permission.denied|insufficient.scope|403/i, "permission denied"],
+    [/api.key|credential|authenticat|sign.in|log.in/i, "credential error"],
+    [/quota|rate.limit|billing|subscription|usage.limit|credit|429/i, "usage or billing limit"],
+    [/model/i, "model unavailable"],
+    [/network|connect|certificate|getaddrinfo|fetch failed|timed out/i, "connection failed"],
+    [/unknown option|invalid option|unknown argument|not supported/i, "unsupported CLI invocation"],
+    [/plugin/i, "plugin startup failed"],
+    [/ENOENT|no such file|not found/i, "required file or executable missing"],
+  ];
+  return categories.find(([pattern]) => pattern.test(message))?.[1] || "unrecognized CLI error";
+}
+
 function runAgent(agent, { home, workspace, installed, prompt, log }) {
   return new Promise((resolve) => {
     // observeTurn creates this private workspace and its only file. Headless Cursor requires explicit trust.
@@ -271,10 +289,14 @@ function runAgent(agent, { home, workspace, installed, prompt, log }) {
     });
     const output = fs.createWriteStream(log, { mode: 0o600 });
     child.stdout.pipe(output, { end: false });
-    child.stderr.resume();
+    let diagnostic = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      diagnostic = (diagnostic + chunk).slice(-8192);
+    });
     const timer = setTimeout(() => child.kill("SIGKILL"), TURN_TIMEOUT_MS);
     child.once("error", () => {}); // spawn failure also emits close
-    child.once("close", (code) => { clearTimeout(timer); output.end(() => resolve(code)); });
+    child.once("close", (code) => { clearTimeout(timer); output.end(() => resolve({ code, diagnostic })); });
   });
 }
 
@@ -321,7 +343,7 @@ async function observeTurn(agent, { home, installed, work, version, kind, upstre
     const filename = `note-${trace}.txt`;
     fs.writeFileSync(path.join(workspace, filename), `${trace} ${secretWord}\n`, { mode: 0o600 });
     const log = path.join(work, `${kind}-agent.json`);
-    const code = await runAgent(agent, {
+    const { code, diagnostic } = await runAgent(agent, {
       home, workspace, installed, log,
       prompt: `Read the local file ${filename} and reply with the two words it contains. Use the read tool only. If the read is denied, stop and quote the reason verbatim.`,
     });
@@ -334,8 +356,9 @@ async function observeTurn(agent, { home, installed, work, version, kind, upstre
       if (!denied && reply.result.includes(secretWord) && correlated) return "PASS";
       if (denied && denialVisible(recorder.seen, reply.result, secretWord)) return "PASS";
     }
+    const reason = code === 0 ? "" : `, ${cursorFailureReason(diagnostic || String(reply?.error || reply?.result || ""))}`;
     say(`${kind} turn was not observed through the installed plugin (agent exit ${code ?? "none"}, `
-      + `${recorder.seen.length} classifications)`);
+      + `${recorder.seen.length} classifications${reason})`);
     return "FAIL";
   } finally {
     await recorder.close();

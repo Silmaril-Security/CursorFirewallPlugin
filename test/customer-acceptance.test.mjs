@@ -61,3 +61,11 @@ test("the client denial requires the actual rule decision and withholds the unpr
   assert.equal(denialVisible([denied], notice + word, word), false);
   assert.equal(denialVisible([denied, { hook: "tool_response", containsWord: true }], notice, word), false);
 });
+
+
+test("CLI diagnostics disclose only fixed failure categories", async () => {
+  const { cursorFailureReason } = await import("../scripts/customer-published-acceptance");
+  assert.equal(cursorFailureReason("Authentication required. Private text and credential"), "authentication rejected");
+  assert.equal(cursorFailureReason("Workspace Trust Required: /private/qa"), "workspace trust required");
+  assert.equal(cursorFailureReason("arbitrary secret response"), "unrecognized CLI error");
+});
