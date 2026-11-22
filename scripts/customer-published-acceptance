@@ -363,6 +363,12 @@ export function denialVisible(observations, response, fileWord) {
     && response.includes("Silmaril Firewall blocked potentially malicious content.");
 }
 
+// Report only fixed callback names. Payloads and vendor responses can contain tenant data.
+export function missingAllowCallbacks(observations) {
+  return ["user_input", "tool_call", "tool_response"].filter((hook) =>
+    !observations.some((r) => r.hook === hook && r.trace && r.ok && r.prediction?.toUpperCase() === "BENIGN"));
+}
+
 // One real turn through the installed plugin. Returns PASS or FAIL; prerequisites are decided by the caller.
 async function observeTurn(agent, { home, env, installed, work, version, kind, upstream, upstreamKey }) {
   const trace = `silmaril-trace-${crypto.randomBytes(12).toString("hex")}`;
@@ -384,12 +390,20 @@ async function observeTurn(agent, { home, env, installed, work, version, kind, u
     });
     let reply;
     try { reply = readJson(log); } catch { /* incomplete agent result */ }
-    const hooks = ["user_input", "tool_call", "tool_response"];
-    const correlated = hooks.every((hook) => recorder.seen.some((r) => r.hook === hook && r.trace && r.ok && r.prediction?.toUpperCase() === "BENIGN"));
+    const missing = missingAllowCallbacks(recorder.seen);
     const completed = code === 0 && reply?.type === "result" && reply?.is_error === false && typeof reply.result === "string";
-    if (completed && evidenceComplete(home, version, denied)) {
-      if (!denied && reply.result.includes(secretWord) && correlated) return "PASS";
+    const evidence = evidenceComplete(home, version, denied);
+    if (completed && evidence) {
+      if (!denied && reply.result.includes(secretWord) && missing.length === 0) return "PASS";
       if (denied && denialVisible(recorder.seen, reply.result, secretWord)) return "PASS";
+    }
+    const observedResult = completed ? reply.result : "";
+    if (denied) {
+      say(`denial evidence: same-session plugin events=${evidence}, client completed=${completed}, `
+        + `denial visible=${completed && denialVisible(recorder.seen, observedResult, secretWord)}`);
+    } else {
+      say(`${kind} evidence: missing correlated allow callbacks=${missing.join(",") || "none"}, `
+        + `same-session plugin events=${evidence}, client completed=${completed}, file readback=${observedResult.includes(secretWord)}`);
     }
     const reason = code === 0 ? "" : `, ${cursorFailureReason(diagnostic || String(reply?.error || reply?.result || ""))}`;
     say(`${kind} turn was not observed through the installed plugin (agent exit ${code ?? "none"}, `
