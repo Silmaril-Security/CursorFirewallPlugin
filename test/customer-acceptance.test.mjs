@@ -197,26 +197,45 @@ test("the pinned CLI may omit only prompt coverage from a completed read or deni
   assert.equal(passes(assess(events, [callbacks[0]], true)), false);
 });
 
-test("only a disconnected turn with verified policy effects and no client output can retry", async () => {
-  const { interruptedAfterPolicyCheck, verifyTurn } = await import("../scripts/customer-published-acceptance");
-  const call = { hook: "tool_call", trace: true, deny: true, ok: true, prediction: "BENIGN" };
-  const result = { ...call, hook: "tool_response", deny: false, containsWord: true };
-  const turn = { code: 1, diagnostic: "Connection lost, reconnecting to the provider (attempt 3)...",
-    complete: true, missing: [], denied: false, outputBytes: 0, observations: [result] };
-  assert.equal(interruptedAfterPolicyCheck(turn), true);
-  for (const change of [{ code: 0 }, { complete: false }, { missing: ["tool_call"] }, { outputBytes: 1 },
-    { diagnostic: "Forbidden" }, { observations: [{ ...result, ok: false }] }, { observations: [call] }]) {
-    assert.equal(interruptedAfterPolicyCheck({ ...turn, ...change }), false);
+test("only a verified read or denial can resume its own interrupted conversation", async () => {
+  const { createHash } = await import("node:crypto");
+  const { canResumeTurn } = await import("../scripts/customer-published-acceptance");
+  const session = "d6fdc7a2-8346-4bf8-a698-a02ddbe322df";
+  const fingerprint = createHash("sha256").update(`session:${session}`).digest("hex");
+  const turn = { code: 1, session, valid: true, reconnecting: true, disclosed: false };
+  const call = { session: fingerprint, hook: "tool_call", trace: true, deny: false, ok: true, prediction: "BENIGN" };
+  const response = { ...call, hook: "tool_response", containsWord: true };
+  const evidence = { complete: true, missing: [] };
+  const eligible = (t, e = evidence, rows = [call, response]) => canResumeTurn(t, e, false, rows);
+  assert.equal(eligible(turn), true);
+  for (const changes of [{ code: 0 }, { code: null }, { session: "unrelated" }, { valid: false },
+    { reconnecting: false }, { reply: { is_error: true } }]) {
+    assert.equal(eligible({ ...turn, ...changes }), false);
   }
-  assert.equal(interruptedAfterPolicyCheck({ ...turn, denied: true, observations: [call] }), true);
-  assert.equal(interruptedAfterPolicyCheck({ ...turn, denied: true, observations: [call, result] }), false);
-  for (const [attempts, expected, count] of [
-    [["FAIL", "PASS"], "FAIL", 1], [["PASS"], "PASS", 1],
-    [["INTERRUPTED", "PASS"], "PASS", 2], [["INTERRUPTED", "FAIL"], "FAIL", 2],
-    [["INTERRUPTED", "INTERRUPTED", "PASS"], "FAIL", 2],
-  ]) {
-    let used = 0;
-    assert.equal(await verifyTurn(null, { kind: "native" }, async () => attempts[used++]), expected);
-    assert.equal(used, count);
+  assert.equal(eligible(turn, { ...evidence, complete: false }), false);
+  assert.equal(eligible(turn, { ...evidence, missing: ["tool_response"] }), false);
+  assert.equal(eligible(turn, evidence, [call]), false);
+  assert.equal(eligible(turn, evidence, [call, { ...response, ok: false }]), false);
+  const blocked = [{ ...call, deny: true }];
+  assert.equal(canResumeTurn(turn, evidence, true, blocked), true);
+  assert.equal(canResumeTurn(turn, evidence, true, [...blocked, response]), false);
+  assert.equal(canResumeTurn({ ...turn, disclosed: true }, evidence, true, blocked), false);
+});
+
+test("stream results must terminate a single initialized conversation", async () => {
+  const { Readable } = await import("node:stream");
+  const { readTurnStream } = await import("../scripts/customer-published-acceptance");
+  const session_id = "d6fdc7a2-8346-4bf8-a698-a02ddbe322df";
+  const init = { type: "system", subtype: "init", session_id };
+  const result = { type: "result", session_id, result: "answer", is_error: false };
+  const read = (...rows) => readTurnStream(Readable.from(rows.map((r) =>
+    (typeof r === "string" ? r : JSON.stringify(r)) + "\n")), "private-word");
+  const flags = await read(init, { type: "tool_call" }, { type: "connection", subtype: "reconnecting" },
+    { type: "assistant", message: { content: [{ type: "text", text: "private-word" }] } });
+  assert.deepEqual(flags, { valid: true, session: session_id, reconnecting: true, toolUsed: true, disclosed: true, reply: undefined });
+  assert.deepEqual((await read(init, result)).reply, result);
+  for (const rows of [[result], [init, "truncated"], [init, init], [init, result, result],
+    [init, { ...result, session_id: "another" }], [init, { ...result, session_id: undefined }]]) {
+    assert.equal((await read(...rows)).valid, false);
   }
 });

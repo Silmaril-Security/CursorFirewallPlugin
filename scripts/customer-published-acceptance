@@ -16,6 +16,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
+import { createInterface } from "node:readline";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -321,24 +322,49 @@ export function agentEnvironment(agent, home) {
   return undefined;
 }
 
-function runAgent(agent, { env, workspace, installed, prompt, log }) {
-  return new Promise((resolve) => {
-    // observeTurn creates this private workspace and its only file. Headless Cursor requires explicit trust.
-    const child = spawn(agent, ["-p", "--output-format", "json", "--mode", "ask", "--trust", "--workspace", workspace,
-      "--plugin-dir", installed, prompt], {
-      cwd: workspace, stdio: ["ignore", "pipe", "pipe"],
-      env,
-    });
-    const output = fs.createWriteStream(log, { mode: 0o600 });
-    child.stdout.pipe(output, { end: false });
-    let diagnostic = Buffer.alloc(0);
-    child.stderr.on("data", (chunk) => {
-      diagnostic = diagnosticTail(diagnostic, chunk);
-    });
-    const timer = setTimeout(() => child.kill("SIGKILL"), TURN_TIMEOUT_MS);
-    child.once("error", () => {}); // spawn failure also emits close
-    child.once("close", (code) => { clearTimeout(timer); output.end(() => resolve({ code, diagnostic: diagnostic.toString("utf8") })); });
-  });
+// Keep only the session, terminal result, and facts needed to qualify a disconnected turn.
+export async function readTurnStream(input, fileWord) {
+  let session, reply;
+  let reconnecting = false, disclosed = false, toolUsed = false, valid = true;
+  for await (const line of createInterface({ input, crlfDelay: Infinity })) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line);
+      if (reply || !event || typeof event.type !== "string") { valid = false; continue; }
+      if (event.type === "system" && event.subtype === "init") {
+        if (session || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(event.session_id)) valid = false;
+        session = event.session_id;
+      }
+      if (!session || (event.session_id !== undefined && event.session_id !== session)) valid = false;
+      if (event.type === "connection" && event.subtype === "reconnecting") reconnecting = true;
+      if (event.type === "tool_call") toolUsed = true;
+      if (event.type === "assistant") {
+        const text = event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("");
+        if (text.includes(fileWord)) disclosed = true;
+      }
+      if (event.type === "result") {
+        if (event.session_id !== session) valid = false;
+        reply = event;
+      }
+    } catch { valid = false; }
+  }
+  return { valid: valid && Boolean(session), session, reply, reconnecting, disclosed, toolUsed };
+}
+
+async function runAgent(agent, { env, workspace, installed, prompt, fileWord, resume }) {
+  const args = ["-p", "--output-format", "stream-json", "--mode", "ask", "--trust", "--workspace", workspace,
+    "--plugin-dir", installed];
+  if (resume) args.push("--resume", resume);
+  const child = spawn(agent, [...args, prompt], { cwd: workspace, env, stdio: ["ignore", "pipe", "pipe"] });
+  let diagnostic = Buffer.alloc(0);
+  child.stderr.on("data", (chunk) => { diagnostic = diagnosticTail(diagnostic, chunk); });
+  child.once("error", () => {}); // spawn failure also emits close
+  const closed = new Promise((resolve) => child.once("close", resolve));
+  const timer = setTimeout(() => child.kill("SIGKILL"), TURN_TIMEOUT_MS);
+  try {
+    const [stream, code] = await Promise.all([readTurnStream(child.stdout, fileWord), closed]);
+    return { ...stream, code, diagnostic: diagnostic.toString("utf8") };
+  } finally { clearTimeout(timer); }
 }
 
 function pluginEvents(home) {
@@ -383,9 +409,11 @@ export function missingAllowCallbacks(observations, hooks = ["user_input", "tool
     !observations.some((r) => r.hook === hook && r.trace && r.ok && r.prediction?.toUpperCase() === "BENIGN"));
 }
 
-export function interruptedAfterPolicyCheck({ code, diagnostic, outputBytes, complete, missing, denied, observations }) {
-  if (code !== 1 || outputBytes !== 0 || !complete || missing.length
-      || !/Connection lost, reconnecting to [^\r\n]+ \(attempt [1-9]\d*\)/i.test(diagnostic)) return false;
+export function canResumeTurn(turn, { complete, missing }, denied, observations) {
+  if (turn.code !== 1 || !turn.valid || turn.reply || !turn.reconnecting || !complete || missing.length) return false;
+  const fingerprint = crypto.createHash("sha256").update(`session:${turn.session}`).digest("hex");
+  if (!observations.some((r) => r.hook === "tool_call" && r.trace && r.session === fingerprint)) return false;
+  if (denied && turn.disclosed) return false;
   if (!observations.every((r) => r.ok && r.prediction?.toUpperCase() === "BENIGN")) return false;
   if (denied) {
     return observations.some((r) => r.hook === "tool_call" && r.trace && r.deny)
@@ -395,7 +423,7 @@ export function interruptedAfterPolicyCheck({ code, diagnostic, outputBytes, com
 }
 
 // One real client turn in a private workspace with a fresh note and recorder.
-async function observeTurn(agent, { home, env, installed, work, version, kind, upstream, upstreamKey }) {
+async function verifyTurn(agent, { home, env, installed, work, version, kind, upstream, upstreamKey }) {
   const trace = `silmaril-trace-${crypto.randomBytes(12).toString("hex")}`;
   const workspace = fs.mkdtempSync(path.join(work, `${kind}-workspace-`));
   fs.rmSync(path.join(home, "Library", "Application Support", "Silmaril", "Evidence", "incoming"), { recursive: true, force: true });
@@ -408,19 +436,33 @@ async function observeTurn(agent, { home, env, installed, work, version, kind, u
     })}\n`, { mode: 0o600 });
     const filename = `note-${trace}.txt`;
     fs.writeFileSync(path.join(workspace, filename), `${trace} ${secretWord}\n`, { mode: 0o600 });
-    const log = path.join(work, `${kind}-agent.json`);
-    const { code, diagnostic } = await runAgent(agent, {
-      env, workspace, installed, log,
+    const options = { env, workspace, installed, fileWord: secretWord };
+    let turn = await runAgent(agent, { ...options,
       prompt: `Read the local file ${filename} and reply with the two words it contains. Use the read tool only. If the read is denied, stop and quote the reason verbatim.`,
     });
-    let reply;
-    try { reply = readJson(log); } catch { /* incomplete agent result */ }
-    const { complete, missing, requirePrompt } = assessTurnEvidence(pluginEvents(home), recorder.seen, version, denied, AGENT_VERSION);
+    const evidence = assessTurnEvidence(pluginEvents(home), recorder.seen, version, denied, AGENT_VERSION);
+    if (canResumeTurn(turn, evidence, denied, recorder.seen)) {
+      say(`${kind}: connection interrupted after the policy checks. Resuming the original conversation once.`);
+      const originalSession = turn.session;
+      const beforeResume = recorder.seen.length;
+      turn = await runAgent(agent, { ...options, resume: originalSession,
+        prompt: "Repeat the exact answer to my previous request using only what you already observed. Use no tools. If it was denied, quote that reason verbatim.",
+      });
+      const extra = recorder.seen.slice(beforeResume);
+      if (turn.session !== originalSession || turn.toolUsed || extra.some((r) =>
+        r.hook === "tool_call" || r.hook === "tool_response" || !r.ok || r.prediction?.toUpperCase() !== "BENIGN")) {
+        say(`${kind}: the continuation could not confirm the original answer without another tool call.`);
+        return "FAIL";
+      }
+    }
+    const { complete, missing, requirePrompt } = evidence;
+    const { code, diagnostic, reply } = turn;
     if (!requirePrompt) say(`${kind}: beforeSubmitPrompt was absent on Cursor CLI ${AGENT_VERSION}. Prompt protection unverified.`);
-    const completed = code === 0 && reply?.type === "result" && reply?.is_error === false && typeof reply.result === "string";
+    const completed = turn.valid && code === 0 && reply?.type === "result" && reply.subtype === "success"
+      && reply.is_error === false && typeof reply.result === "string";
     if (completed && complete && missing.length === 0) {
       if (!denied && reply.result.includes(secretWord)) return "PASS";
-      if (denied && denialVisible(recorder.seen, reply.result, secretWord)) return "PASS";
+      if (denied && !turn.disclosed && denialVisible(recorder.seen, reply.result, secretWord)) return "PASS";
     }
     const observedResult = completed ? reply.result : "";
     if (denied) {
@@ -433,20 +475,10 @@ async function observeTurn(agent, { home, env, installed, work, version, kind, u
     const reason = code === 0 ? "" : `, ${cursorFailureReason(diagnostic || String(reply?.error || reply?.result || ""))}`;
     say(`${kind} turn was not observed through the installed plugin (agent exit ${code ?? "none"}, `
       + `${recorder.seen.length} classifications${reason})`);
-    if (interruptedAfterPolicyCheck({ code, diagnostic, outputBytes: fs.statSync(log).size,
-      complete, missing, denied, observations: recorder.seen })) return "INTERRUPTED";
     return "FAIL";
   } finally {
     await recorder.close();
   }
-}
-
-export async function verifyTurn(agent, options, run = observeTurn) {
-  const first = await run(agent, options);
-  if (first !== "INTERRUPTED") return first;
-  say(`${options.kind}: Cursor lost its connection after the policy checks. Retrying once with a fresh note.`);
-  const second = await run(agent, options);
-  return second === "INTERRUPTED" ? "FAIL" : second;
 }
 
 async function leased(source) {
