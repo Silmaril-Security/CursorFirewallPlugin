@@ -5,6 +5,8 @@ import path from "node:path";
 
 const MAX_EVENT_BYTES = 16 * 1024;
 const MAX_SAFE_VALUE_LENGTH = 128;
+const MAX_PROVENANCE_VERSION_BYTES = 128;
+const PLUGIN_POLICY_VERSION = "cursor-plugin-policy-v1";
 const DEFAULT_DIRECTORY = ["Library", "Application Support", "Silmaril", "Evidence", "incoming"];
 export const CONFIDENCE_LEVELS = ["very_low", "low", "medium", "high", "very_high"] as const;
 export const SEVERITY_LEVELS = ["minimal", "low", "moderate", "high", "critical"] as const;
@@ -39,7 +41,8 @@ export type LocalProtectionEventV1 = {
     producer: string;
     producerVersion: string;
     pluginVersion: string;
-    policyVersion: "cursor-plugin-policy-v1";
+    policyVersion: string;
+    modelVersion?: string;
     observedAt: string;
   };
 };
@@ -100,14 +103,17 @@ export function buildLocalProtectionEvent(input: LocalEvidenceInput): LocalProte
       ? "native_response_returned"
       : "plugin_reported",
     evidenceCompleteness: "partial",
-    provenance: {
+    provenance: omitUndefined({
       schemaVersion: 1,
       producer: bounded(input.pluginName) ?? "cursor-firewall-plugin",
       producerVersion: bounded(input.pluginVersion) ?? "unknown",
       pluginVersion: bounded(input.pluginVersion) ?? "unknown",
-      policyVersion: "cursor-plugin-policy-v1",
+      policyVersion: provenanceVersion(
+        (input.classification.governance as Record<string, unknown> | null | undefined)?.policyVersion,
+      ) ?? PLUGIN_POLICY_VERSION,
+      modelVersion: provenanceVersion(input.classification.modelId),
       observedAt: occurredAt,
-    },
+    }),
   };
   return omitUndefined(event) as LocalProtectionEventV1;
 }
@@ -204,6 +210,16 @@ function sha256(value: string): string {
 function bounded(value: string, maxLength = MAX_SAFE_VALUE_LENGTH): string | undefined {
   const trimmed = value.trim();
   return trimmed ? trimmed.slice(0, maxLength) : undefined;
+}
+
+function provenanceVersion(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  let bounded = "";
+  for (const character of value.replace(/[\p{Cc}\p{Cf}\p{Cs}]+/gu, " ").trim()) {
+    if (Buffer.byteLength(bounded + character, "utf8") > MAX_PROVENANCE_VERSION_BYTES) break;
+    bounded += character;
+  }
+  return bounded.trimEnd() || undefined;
 }
 
 function omitUndefined(value: Record<string, unknown>): Record<string, unknown> {

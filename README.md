@@ -101,7 +101,7 @@ Each completed classification emits a bounded `LocalProtectionEventV1` record to
 ~/Library/Application Support/Silmaril/Evidence/incoming
 ```
 
-The spool directory is private (`0700`), files are private (`0600`), and each event is written to a temporary file before atomic rename. Events contain fingerprints, policy/native decisions, bounded consequence metadata, and version provenance. A block records the Firewall's `confidence` and `severity` labels when the decision carries them; events no longer carry a model score or threshold. They never contain prompts, reasoning, assistant output, tool arguments/results, API keys, endpoints, transcripts, workspace paths, or user email. Evidence failures never change a Cursor decision.
+The spool directory is private (`0700`), files are private (`0600`), and each event is written to a temporary file before atomic rename. Events contain fingerprints, policy/native decisions, bounded consequence metadata, and version provenance. A block records the Firewall's `confidence` and `severity` labels when the decision carries them; events no longer carry a model score or threshold. Provenance records the result's `modelId` as `modelVersion` when present, and `policyVersion` is the governance decision's `policyVersion` or, without one, the fixed `cursor-plugin-policy-v1`; both have control and format characters removed and are at most 128 UTF-8 bytes. They never contain prompts, reasoning, assistant output, tool arguments/results, API keys, endpoints, transcripts, workspace paths, or user email. Evidence failures never change a Cursor decision.
 
 ## Demo
 

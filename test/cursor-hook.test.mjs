@@ -133,6 +133,8 @@ test("bundled SDK enforces a version 2 block and records its confidence and seve
   assert.equal(events[0].riskClass, "credential_exposure");
   assert.equal(events[0].policyDecision, "block");
   assert.equal(events[0].nativeAction, "block_returned");
+  assert.equal(events[0].provenance.modelVersion, MODEL_BLOCK.model_id);
+  assert.equal(events[0].provenance.policyVersion, "cursor-plugin-policy-v1");
 });
 
 test("bundled SDK enforces a block through the /classify fallback and from a version 1 body on /v2/classify", async () => {
@@ -140,7 +142,10 @@ test("bundled SDK enforces a block through the /classify fallback and from a ver
     [FALLBACK_ONLY, ["/v2/classify", "/classify"]],
     [VERSION_1_ON_VERSION_2_PATH, ["/v2/classify"]],
   ]) {
-    for (const [decision, prediction] of [[MODEL_BLOCK, "malicious"], [GOVERNANCE_BLOCK, "benign"]]) {
+    for (const [decision, prediction, policyVersion] of [
+      [MODEL_BLOCK, "malicious", "cursor-plugin-policy-v1"],
+      [GOVERNANCE_BLOCK, "benign", GOVERNANCE_BLOCK.governance.policy_version],
+    ]) {
       const { output, paths, events } = await runAgainstMockClassifier(
         { decision, responses },
         { SILMARIL_MODE: "block" },
@@ -153,6 +158,8 @@ test("bundled SDK enforces a block through the /classify fallback and from a ver
       assert.equal(events[0].nativeAction, "block_returned");
       assert.equal(Object.hasOwn(events[0], "confidence"), false);
       assert.equal(Object.hasOwn(events[0], "severity"), false);
+      assert.equal(events[0].provenance.modelVersion, decision.model_id ?? undefined);
+      assert.equal(events[0].provenance.policyVersion, policyVersion);
     }
   }
 });
@@ -890,6 +897,44 @@ test("local evidence keeps only closed confidence and severity labels and derive
   assert.equal(build({ action: "block", source: "governance" }).prediction, "benign");
   assert.equal(build({ action: "block" }).prediction, "malicious");
   assert.equal(build({}).prediction, "unavailable");
+});
+
+test("local evidence records the model and governance policy versions within the ingestion bounds", () => {
+  const provenance = (classification) => buildLocalProtectionEvent({
+    pluginName: "cursor-firewall-plugin",
+    pluginVersion: "0.4.0",
+    hook: "pre_tool",
+    mode: "block",
+    classification: { action: "block", source: "governance", ...classification },
+    policyDecision: "block",
+    nativeAction: "block_returned",
+  }).provenance;
+  for (const [reported, recorded] of [
+    [" silmaril-cascade-1-6 ", "silmaril-cascade-1-6"],
+    ["silmaril\u0000cascade\u200b\u00851-6", "silmaril cascade 1-6"],
+    ["m".repeat(200), "m".repeat(128)],
+    ["\u00e9".repeat(100), "\u00e9".repeat(64)],
+    [`${"m".repeat(127)}\u00e9`, "m".repeat(127)],
+    ["\ud800", undefined],
+    ["   ", undefined],
+    [16, undefined],
+    [null, undefined],
+  ]) {
+    const recordedProvenance = provenance({
+      modelId: reported,
+      governance: { action: "block", policyVersion: reported },
+    });
+    assert.equal(recordedProvenance.modelVersion, recorded);
+    assert.equal(recordedProvenance.policyVersion, recorded ?? "cursor-plugin-policy-v1");
+  }
+  const unread = provenance({
+    model_id: "silmaril-cascade-1-6",
+    policy_version: "policy-7",
+    governance: { action: "block", policy_version: "policy-7" },
+  });
+  assert.equal(Object.hasOwn(unread, "modelVersion"), false);
+  assert.equal(unread.policyVersion, "cursor-plugin-policy-v1");
+  assert.equal(provenance({ governance: null }).policyVersion, "cursor-plugin-policy-v1");
 });
 
 test("demo launcher normalizes URLs and never returns the key", async () => {
