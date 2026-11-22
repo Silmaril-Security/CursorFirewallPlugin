@@ -61,3 +61,20 @@ test("the client denial requires the actual rule decision and withholds the unpr
   assert.equal(denialVisible([denied], notice + word, word), false);
   assert.equal(denialVisible([denied, { hook: "tool_response", containsWord: true }], notice, word), false);
 });
+
+
+test("CLI diagnostics disclose only fixed failure categories", async () => {
+  const { cursorFailureReason } = await import("../scripts/customer-published-acceptance");
+  assert.equal(cursorFailureReason("Authentication required. Private text and credential"), "authentication rejected");
+  assert.equal(cursorFailureReason("Workspace Trust Required: /private/qa"), "workspace trust required");
+  assert.equal(cursorFailureReason("arbitrary secret response"), "unrecognized CLI error");
+});
+
+
+test("private diagnostics retain only the last 8192 bytes across UTF-8 chunks", async () => {
+  const { diagnosticTail } = await import("../scripts/customer-published-acceptance");
+  const chunk = Buffer.from("é".repeat(6000));
+  const tail = diagnosticTail(Buffer.alloc(0), chunk);
+  assert.equal(tail.length, 8192);
+  assert.deepEqual(diagnosticTail(tail, Buffer.from("end")), Buffer.concat([chunk, Buffer.from("end")]).subarray(-8192));
+});
