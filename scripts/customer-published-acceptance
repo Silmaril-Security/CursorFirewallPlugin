@@ -246,7 +246,10 @@ function startRecorder(upstream, upstreamKey, trace, denyRead, fileWord) {
         try {
           prediction = JSON.parse(body).prediction;
         } catch { /* not a classification */ }
+        const conversation = payload.metadata?.conversationId;
         seen.push({
+          session: typeof conversation === "string" && conversation.trim()
+            ? crypto.createHash("sha256").update(`session:${conversation}`).digest("hex") : undefined,
           hook: payload.hook, trace: typeof payload.text === "string" && payload.text.includes(trace),
           deny, containsWord: payload.text?.includes(fileWord) === true,
           ok: status >= 200 && status < 300, prediction: typeof prediction === "string" ? prediction : undefined,
@@ -338,25 +341,33 @@ function runAgent(agent, { env, workspace, installed, prompt, log }) {
   });
 }
 
-// The plugin's own evidence spool is the structural record: all three hooks, one conversation, the installed version.
-function evidenceComplete(home, version, denied) {
+function pluginEvents(home) {
   const directory = path.join(home, "Library", "Application Support", "Silmaril", "Evidence", "incoming");
-  let events;
   try {
-    events = fs.readdirSync(directory).filter((name) => /^event-.*\.json$/.test(name)).map((name) => readJson(path.join(directory, name)));
+    return fs.readdirSync(directory).filter((name) => /^event-.*\.json$/.test(name)).map((name) => readJson(path.join(directory, name)));
   } catch {
-    return false;
+    return [];
   }
-  const verified = events.filter((e) => e.host === "cursor" && e.provenance?.pluginVersion === version
-    && e.mode === "block" && e.prediction === "benign" && e.sessionFingerprint);
-  const prompts = verified.filter((e) => e.hook === "user_input" && e.nativeAction === "allowed");
-  return prompts.some((prompt) => {
-    const session = verified.filter((e) => e.sessionFingerprint === prompt.sessionFingerprint);
-    if (denied) return session.some((e) => e.hook === "pre_tool" && e.policyDecision === "block"
-      && e.nativeAction === "block_returned");
-    return ["pre_tool", "post_tool"].every((hook) => session.some((e) => e.hook === hook
-      && e.policyDecision === "allow" && e.nativeAction === "allowed"));
-  });
+}
+
+export function assessTurnEvidence(events, observations, version, denied, cliVersion) {
+  // A fresh filename identifies the test read even when the CLI omits its prompt hook.
+  const readSessions = new Set(observations.filter((r) => r.hook === "tool_call" && r.trace && r.ok).map((r) => r.session));
+  const [session] = readSessions;
+  const callbacks = observations.filter((r) => r.session === session);
+  const plugin = events.filter((e) => e.host === "cursor" && e.provenance?.pluginVersion === version);
+  const promptObserved = observations.some((r) => r.hook === "user_input") || plugin.some((e) => e.hook === "user_input");
+  const requirePrompt = cliVersion !== "2026.11.19-f005e9d" || promptObserved;
+  const hooks = denied ? ["tool_call"] : ["tool_call", "tool_response"];
+  if (requirePrompt) hooks.unshift("user_input");
+  const missing = missingAllowCallbacks(callbacks, hooks);
+  const verified = plugin.filter((e) => e.sessionFingerprint === session && e.mode === "block" && e.prediction === "benign");
+  const allowed = (hook) => verified.some((e) => e.hook === hook && e.policyDecision === "allow" && e.nativeAction === "allowed");
+  const tools = denied
+    ? verified.some((e) => e.hook === "pre_tool" && e.policyDecision === "block" && e.nativeAction === "block_returned")
+    : allowed("pre_tool") && allowed("post_tool");
+  const complete = Boolean(session) && readSessions.size === 1 && tools && (!requirePrompt || allowed("user_input"));
+  return { complete, missing, requirePrompt };
 }
 
 export function denialVisible(observations, response, fileWord) {
@@ -367,8 +378,8 @@ export function denialVisible(observations, response, fileWord) {
 }
 
 // Report only fixed callback names. Payloads and vendor responses can contain tenant data.
-export function missingAllowCallbacks(observations) {
-  return ["user_input", "tool_call", "tool_response"].filter((hook) =>
+export function missingAllowCallbacks(observations, hooks = ["user_input", "tool_call", "tool_response"]) {
+  return hooks.filter((hook) =>
     !observations.some((r) => r.hook === hook && r.trace && r.ok && r.prediction?.toUpperCase() === "BENIGN"));
 }
 
@@ -393,20 +404,20 @@ async function observeTurn(agent, { home, env, installed, work, version, kind, u
     });
     let reply;
     try { reply = readJson(log); } catch { /* incomplete agent result */ }
-    const missing = missingAllowCallbacks(recorder.seen);
+    const { complete, missing, requirePrompt } = assessTurnEvidence(pluginEvents(home), recorder.seen, version, denied, AGENT_VERSION);
+    if (!requirePrompt) say(`${kind}: beforeSubmitPrompt was absent on Cursor CLI ${AGENT_VERSION}. Prompt protection unverified.`);
     const completed = code === 0 && reply?.type === "result" && reply?.is_error === false && typeof reply.result === "string";
-    const evidence = evidenceComplete(home, version, denied);
-    if (completed && evidence) {
-      if (!denied && reply.result.includes(secretWord) && missing.length === 0) return "PASS";
+    if (completed && complete && missing.length === 0) {
+      if (!denied && reply.result.includes(secretWord)) return "PASS";
       if (denied && denialVisible(recorder.seen, reply.result, secretWord)) return "PASS";
     }
     const observedResult = completed ? reply.result : "";
     if (denied) {
-      say(`denial evidence: same-session plugin events=${evidence}, client completed=${completed}, `
+      say(`denial evidence: same-session plugin events=${complete}, client completed=${completed}, `
         + `denial visible=${completed && denialVisible(recorder.seen, observedResult, secretWord)}`);
     } else {
       say(`${kind} evidence: missing correlated allow callbacks=${missing.join(",") || "none"}, `
-        + `same-session plugin events=${evidence}, client completed=${completed}, file readback=${observedResult.includes(secretWord)}`);
+        + `same-session plugin events=${complete}, client completed=${completed}, file readback=${observedResult.includes(secretWord)}`);
     }
     const reason = code === 0 ? "" : `, ${cursorFailureReason(diagnostic || String(reply?.error || reply?.result || ""))}`;
     say(`${kind} turn was not observed through the installed plugin (agent exit ${code ?? "none"}, `
