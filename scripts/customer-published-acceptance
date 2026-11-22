@@ -199,13 +199,16 @@ function installedMatchesPacked(source, installed) {
   });
 }
 
-function pinnedAgent(home) {
-  const real = process.env.HOME || os.homedir();
+export function pinnedAgent(home, environment = process.env) {
+  const real = environment.HOME || os.homedir();
   const names = ["agent", "cursor-agent"];
-  const found = process.env.CURSOR_AGENT_BIN
-    ? [process.env.CURSOR_AGENT_BIN]
-    : [...(process.env.PATH || "").split(path.delimiter), path.join(real, ".local", "bin")]
-      .filter(Boolean).flatMap((directory) => names.map((name) => path.join(directory, name)));
+  const found = environment.CURSOR_AGENT_BIN
+    ? [environment.CURSOR_AGENT_BIN]
+    : [
+      path.join(real, ".local", "share", "cursor-agent", "versions", AGENT_VERSION, "cursor-agent"),
+      ...[...(environment.PATH || "").split(path.delimiter), path.join(real, ".local", "bin")]
+        .filter(Boolean).flatMap((directory) => names.map((name) => path.join(directory, name))),
+    ];
   for (const candidate of found) {
     if (!path.isAbsolute(candidate) || !fs.statSync(candidate, { throwIfNoEntry: false })?.isFile()) continue;
     const probe = spawnSync(candidate, ["--version"], { encoding: "utf8", env: childEnvironment(home), timeout: 30_000 });
