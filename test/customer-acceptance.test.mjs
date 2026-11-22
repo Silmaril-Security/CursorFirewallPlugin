@@ -197,26 +197,104 @@ test("the pinned CLI may omit only prompt coverage from a completed read or deni
   assert.equal(passes(assess(events, [callbacks[0]], true)), false);
 });
 
-test("only a disconnected turn with verified policy effects and no client output can retry", async () => {
-  const { interruptedAfterPolicyCheck, verifyTurn } = await import("../scripts/customer-published-acceptance");
-  const call = { hook: "tool_call", trace: true, deny: true, ok: true, prediction: "BENIGN" };
-  const result = { ...call, hook: "tool_response", deny: false, containsWord: true };
-  const turn = { code: 1, diagnostic: "Connection lost, reconnecting to the provider (attempt 3)...",
-    complete: true, missing: [], denied: false, outputBytes: 0, observations: [result] };
-  assert.equal(interruptedAfterPolicyCheck(turn), true);
-  for (const change of [{ code: 0 }, { complete: false }, { missing: ["tool_call"] }, { outputBytes: 1 },
-    { diagnostic: "Forbidden" }, { observations: [{ ...result, ok: false }] }, { observations: [call] }]) {
-    assert.equal(interruptedAfterPolicyCheck({ ...turn, ...change }), false);
+test("only a verified read or denial can resume its own interrupted conversation", async () => {
+  const { createHash } = await import("node:crypto");
+  const { canResumeTurn } = await import("../scripts/customer-published-acceptance");
+  const session = "d6fdc7a2-8346-4bf8-a698-a02ddbe322df";
+  const fingerprint = createHash("sha256").update(`session:${session}`).digest("hex");
+  const turn = { code: 1, session, valid: true, reconnecting: true, disclosed: false };
+  const call = { session: fingerprint, hook: "tool_call", trace: true, deny: false, ok: true, prediction: "BENIGN" };
+  const response = { ...call, hook: "tool_response", containsWord: true };
+  const evidence = { complete: true, missing: [] };
+  const eligible = (t, e = evidence, rows = [call, response]) => canResumeTurn(t, e, false, rows);
+  assert.equal(eligible(turn), true);
+  for (const changes of [{ code: 0 }, { code: null }, { session: "unrelated" }, { valid: false },
+    { reconnecting: false }, { reply: { is_error: true } }]) {
+    assert.equal(eligible({ ...turn, ...changes }), false);
   }
-  assert.equal(interruptedAfterPolicyCheck({ ...turn, denied: true, observations: [call] }), true);
-  assert.equal(interruptedAfterPolicyCheck({ ...turn, denied: true, observations: [call, result] }), false);
-  for (const [attempts, expected, count] of [
-    [["FAIL", "PASS"], "FAIL", 1], [["PASS"], "PASS", 1],
-    [["INTERRUPTED", "PASS"], "PASS", 2], [["INTERRUPTED", "FAIL"], "FAIL", 2],
-    [["INTERRUPTED", "INTERRUPTED", "PASS"], "FAIL", 2],
-  ]) {
-    let used = 0;
-    assert.equal(await verifyTurn(null, { kind: "native" }, async () => attempts[used++]), expected);
-    assert.equal(used, count);
+  assert.equal(eligible(turn, { ...evidence, complete: false }), false);
+  assert.equal(eligible(turn, { ...evidence, missing: ["tool_response"] }), false);
+  assert.equal(eligible(turn, evidence, [call]), false);
+  assert.equal(eligible(turn, evidence, [call, { ...response, ok: false }]), false);
+  const blocked = [{ ...call, deny: true }];
+  assert.equal(canResumeTurn(turn, evidence, true, blocked), true);
+  assert.equal(canResumeTurn(turn, evidence, true, [...blocked, response]), false);
+  assert.equal(canResumeTurn({ ...turn, disclosed: true }, evidence, true, blocked), false);
+});
+
+test("stream results must terminate a single initialized conversation", async () => {
+  const { Readable } = await import("node:stream");
+  const { readTurnStream } = await import("../scripts/customer-published-acceptance");
+  const session_id = "d6fdc7a2-8346-4bf8-a698-a02ddbe322df";
+  const init = { type: "system", subtype: "init", session_id };
+  const result = { type: "result", session_id, result: "answer", is_error: false };
+  const read = (...rows) => readTurnStream(Readable.from(rows.map((r) =>
+    (typeof r === "string" ? r : JSON.stringify(r)) + "\n")), "private-word");
+  const flags = await read(init, { type: "tool_call" }, { type: "connection", subtype: "reconnecting" },
+    { type: "assistant", message: { content: [{ type: "text", text: "private-word" }] } });
+  assert.deepEqual(flags, { valid: true, session: session_id, reconnecting: true, toolUsed: true, disclosed: true, reply: undefined });
+  assert.deepEqual((await read(init, result)).reply, result);
+  for (const rows of [[result], [init, "truncated"], [init, init], [init, result, result],
+    [init, { ...result, session_id: "another" }], [init, { ...result, session_id: undefined }]]) {
+    assert.equal((await read(...rows)).valid, false);
+  }
+});
+
+test("the driver resumes once and qualifies only a completed tool-free reply from the original session", async (t) => {
+  const { verifyTurn } = await import("../scripts/customer-published-acceptance");
+  const work = mkdtempSync(path.join(os.tmpdir(), "cursor-resume-"));
+  t.after(() => rmSync(work, { recursive: true, force: true }));
+  mkdirSync(path.join(work, ".cursor"));
+  const agent = path.join(work, "cli.mjs");
+  const session = "d6fdc7a2-8346-4bf8-a698-a02ddbe322df";
+
+  async function simulateClient() {
+    const fs = await import("node:fs");
+    const { createHash } = await import("node:crypto");
+    const { session, scenario, version, HOME } = process.env;
+    const args = process.argv.slice(2);
+    const resume = args.indexOf("--resume");
+    fs.appendFileSync(HOME + "/calls", JSON.stringify(resume < 0 ? null : args[resume + 1]) + "\n");
+    const session_id = resume >= 0 && scenario === "changed session" ? "0640c4c1-73ba-4a09-8892-94a17d116534" : session;
+    const emit = (type, fields) => console.log(JSON.stringify({ type, session_id, ...fields }));
+    emit("system", { subtype: "init" });
+    const note = fs.readdirSync(".").find((name) => name.startsWith("note-"));
+    const [trace, word] = fs.readFileSync(note, "utf8").trim().split(" ");
+    const classify = async () => {
+      const config = JSON.parse(fs.readFileSync(HOME + "/.cursor/silmaril-firewall.json", "utf8"));
+      const response = await fetch(config.apiUrl, { method: "POST",
+        body: JSON.stringify({ hook: "tool_call", text: trace, metadata: { conversationId: session } }) });
+      if ((await response.json()).governance?.action !== "block") throw new Error("expected denied read");
+    };
+    if (resume < 0) {
+      await classify();
+      const spool = HOME + "/Library/Application Support/Silmaril/Evidence/incoming";
+      fs.mkdirSync(spool, { recursive: true });
+      fs.writeFileSync(spool + "/event-deny.json", JSON.stringify({
+        host: "cursor", hook: "pre_tool", provenance: { pluginVersion: version }, mode: "block", prediction: "benign",
+        sessionFingerprint: createHash("sha256").update("session:" + session).digest("hex"),
+        policyDecision: "block", nativeAction: "block_returned",
+      }));
+    }
+    if (resume < 0 || scenario === "second disconnect") {
+      emit("connection", { subtype: "reconnecting" });
+      process.exitCode = 1;
+      return;
+    }
+    if (scenario === "tool event") emit("tool_call", { subtype: "started" });
+    if (scenario === "classified tool") await classify();
+    if (scenario === "intermediate disclosure") emit("assistant", { message: { content: [{ type: "text", text: word }] } });
+    const result = scenario === "terminal disclosure" ? word : "Silmaril Firewall blocked potentially malicious content.";
+    emit("result", { subtype: "success", result, is_error: scenario === "unsuccessful reply" });
+  }
+  writeFileSync(agent, "#!" + process.execPath + "\nawait (" + simulateClient.toString() + ")();\n", { mode: 0o700 });
+  for (const scenario of ["success", "changed session", "tool event", "classified tool", "intermediate disclosure",
+    "terminal disclosure", "second disconnect", "unsuccessful reply"]) {
+    writeFileSync(path.join(work, "calls"), "");
+    const status = await verifyTurn(agent, { home: work, work, installed: work, kind: "denial", version,
+      env: { HOME: work, session, scenario, version } });
+    assert.equal(status, scenario === "success" ? "PASS" : "FAIL", scenario);
+    assert.deepEqual(readFileSync(path.join(work, "calls"), "utf8").trim().split("\n").map(JSON.parse),
+      [null, session], scenario);
   }
 });
