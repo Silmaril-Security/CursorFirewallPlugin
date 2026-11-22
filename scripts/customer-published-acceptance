@@ -423,7 +423,7 @@ export function canResumeTurn(turn, { complete, missing }, denied, observations)
 }
 
 // One real client turn in a private workspace with a fresh note and recorder.
-async function verifyTurn(agent, { home, env, installed, work, version, kind, upstream, upstreamKey }) {
+export async function verifyTurn(agent, { home, env, installed, work, version, kind, upstream, upstreamKey }) {
   const trace = `silmaril-trace-${crypto.randomBytes(12).toString("hex")}`;
   const workspace = fs.mkdtempSync(path.join(work, `${kind}-workspace-`));
   fs.rmSync(path.join(home, "Library", "Application Support", "Silmaril", "Evidence", "incoming"), { recursive: true, force: true });

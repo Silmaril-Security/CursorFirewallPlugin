@@ -239,3 +239,62 @@ test("stream results must terminate a single initialized conversation", async ()
     assert.equal((await read(...rows)).valid, false);
   }
 });
+
+test("the driver resumes once and qualifies only a completed tool-free reply from the original session", async (t) => {
+  const { verifyTurn } = await import("../scripts/customer-published-acceptance");
+  const work = mkdtempSync(path.join(os.tmpdir(), "cursor-resume-"));
+  t.after(() => rmSync(work, { recursive: true, force: true }));
+  mkdirSync(path.join(work, ".cursor"));
+  const agent = path.join(work, "cli.mjs");
+  const session = "d6fdc7a2-8346-4bf8-a698-a02ddbe322df";
+
+  async function simulateClient() {
+    const fs = await import("node:fs");
+    const { createHash } = await import("node:crypto");
+    const { session, scenario, version, HOME } = process.env;
+    const args = process.argv.slice(2);
+    const resume = args.indexOf("--resume");
+    fs.appendFileSync(HOME + "/calls", JSON.stringify(resume < 0 ? null : args[resume + 1]) + "\n");
+    const session_id = resume >= 0 && scenario === "changed session" ? "0640c4c1-73ba-4a09-8892-94a17d116534" : session;
+    const emit = (type, fields) => console.log(JSON.stringify({ type, session_id, ...fields }));
+    emit("system", { subtype: "init" });
+    const note = fs.readdirSync(".").find((name) => name.startsWith("note-"));
+    const [trace, word] = fs.readFileSync(note, "utf8").trim().split(" ");
+    const classify = async () => {
+      const config = JSON.parse(fs.readFileSync(HOME + "/.cursor/silmaril-firewall.json", "utf8"));
+      const response = await fetch(config.apiUrl, { method: "POST",
+        body: JSON.stringify({ hook: "tool_call", text: trace, metadata: { conversationId: session } }) });
+      if ((await response.json()).governance?.action !== "block") throw new Error("expected denied read");
+    };
+    if (resume < 0) {
+      await classify();
+      const spool = HOME + "/Library/Application Support/Silmaril/Evidence/incoming";
+      fs.mkdirSync(spool, { recursive: true });
+      fs.writeFileSync(spool + "/event-deny.json", JSON.stringify({
+        host: "cursor", hook: "pre_tool", provenance: { pluginVersion: version }, mode: "block", prediction: "benign",
+        sessionFingerprint: createHash("sha256").update("session:" + session).digest("hex"),
+        policyDecision: "block", nativeAction: "block_returned",
+      }));
+    }
+    if (resume < 0 || scenario === "second disconnect") {
+      emit("connection", { subtype: "reconnecting" });
+      process.exitCode = 1;
+      return;
+    }
+    if (scenario === "tool event") emit("tool_call", { subtype: "started" });
+    if (scenario === "classified tool") await classify();
+    if (scenario === "intermediate disclosure") emit("assistant", { message: { content: [{ type: "text", text: word }] } });
+    const result = scenario === "terminal disclosure" ? word : "Silmaril Firewall blocked potentially malicious content.";
+    emit("result", { subtype: "success", result, is_error: scenario === "unsuccessful reply" });
+  }
+  writeFileSync(agent, "#!" + process.execPath + "\nawait (" + simulateClient.toString() + ")();\n", { mode: 0o700 });
+  for (const scenario of ["success", "changed session", "tool event", "classified tool", "intermediate disclosure",
+    "terminal disclosure", "second disconnect", "unsuccessful reply"]) {
+    writeFileSync(path.join(work, "calls"), "");
+    const status = await verifyTurn(agent, { home: work, work, installed: work, kind: "denial", version,
+      env: { HOME: work, session, scenario, version } });
+    assert.equal(status, scenario === "success" ? "PASS" : "FAIL", scenario);
+    assert.deepEqual(readFileSync(path.join(work, "calls"), "utf8").trim().split("\n").map(JSON.parse),
+      [null, session], scenario);
+  }
+});
