@@ -286,13 +286,42 @@ export function diagnosticTail(previous, chunk) {
   return Buffer.concat([previous.subarray(Math.max(0, previous.length + end.length - limit)), end]);
 }
 
-function runAgent(agent, { home, workspace, installed, prompt, log }) {
+function agentEnvironment(agent, home) {
+  const key = process.env.CUSTOMER_CURSOR_API_KEY;
+  if (key) return childEnvironment(home, { CURSOR_API_KEY: key, NO_COLOR: "1" });
+  // Only a lab operator can designate an Aqua login for recurring acceptance.
+  const descriptor = "/Users/Shared/silmaril-release-qa/cursor-qa-identity.json";
+  const trusted = (file) => file.uid === 0 && (file.mode & 0o022) === 0;
+  if (!fs.existsSync(descriptor)) return undefined;
+  const directory = fs.lstatSync(path.dirname(descriptor));
+  const file = fs.lstatSync(descriptor);
+  if (!directory.isDirectory() || !trusted(directory) || !file.isFile() || !trusted(file)) return undefined;
+  const expected = readJson(descriptor);
+  const user = os.userInfo();
+  if (!user.uid || user.username !== expected.account || fs.statSync("/dev/console").uid !== user.uid
+      || typeof expected.email !== "string" || !expected.email) return undefined;
+  const env = childEnvironment(user.homedir, {
+    CURSOR_CONFIG_DIR: path.join(home, ".cursor"),
+    SILMARIL_CONFIG_PATH: path.join(home, ".cursor", "silmaril-firewall.json"),
+    SILMARIL_LOCAL_EVENT_DIR: path.join(home, "Library", "Application Support", "Silmaril", "Evidence", "incoming"),
+    NO_COLOR: "1",
+  });
+  const result = spawnSync(agent, ["status", "--format", "json"], { env, encoding: "utf8", timeout: 30_000 });
+  if (result.status !== 0) return undefined;
+  try {
+    const identity = JSON.parse(result.stdout);
+    if (identity.isAuthenticated === true && identity.userInfo?.email === expected.email) return env;
+  } catch { /* The provider did not confirm the designated identity. */ }
+  return undefined;
+}
+
+function runAgent(agent, { env, workspace, installed, prompt, log }) {
   return new Promise((resolve) => {
     // observeTurn creates this private workspace and its only file. Headless Cursor requires explicit trust.
     const child = spawn(agent, ["-p", "--output-format", "json", "--mode", "ask", "--trust", "--workspace", workspace,
       "--plugin-dir", installed, prompt], {
       cwd: workspace, stdio: ["ignore", "pipe", "pipe"],
-      env: childEnvironment(home, { CURSOR_API_KEY: process.env.CUSTOMER_CURSOR_API_KEY, NO_COLOR: "1" }),
+      env,
     });
     const output = fs.createWriteStream(log, { mode: 0o600 });
     child.stdout.pipe(output, { end: false });
@@ -335,7 +364,7 @@ export function denialVisible(observations, response, fileWord) {
 }
 
 // One real turn through the installed plugin. Returns PASS or FAIL; prerequisites are decided by the caller.
-async function observeTurn(agent, { home, installed, work, version, kind, upstream, upstreamKey }) {
+async function observeTurn(agent, { home, env, installed, work, version, kind, upstream, upstreamKey }) {
   const trace = `silmaril-trace-${crypto.randomBytes(12).toString("hex")}`;
   const workspace = fs.mkdtempSync(path.join(work, `${kind}-workspace-`));
   fs.rmSync(path.join(home, "Library", "Application Support", "Silmaril", "Evidence", "incoming"), { recursive: true, force: true });
@@ -350,7 +379,7 @@ async function observeTurn(agent, { home, installed, work, version, kind, upstre
     fs.writeFileSync(path.join(workspace, filename), `${trace} ${secretWord}\n`, { mode: 0o600 });
     const log = path.join(work, `${kind}-agent.json`);
     const { code, diagnostic } = await runAgent(agent, {
-      home, workspace, installed, log,
+      env, workspace, installed, log,
       prompt: `Read the local file ${filename} and reply with the two words it contains. Use the read tool only. If the read is denied, stop and quote the reason verbatim.`,
     });
     let reply;
@@ -393,12 +422,12 @@ async function leased(source) {
     }
 
     const agent = pinnedAgent(home);
-    const qaKey = process.env.CUSTOMER_CURSOR_API_KEY;
+    const env = agent && agentEnvironment(agent, home);
     if (!agent) say(`native and live blocked: pinned Cursor CLI ${AGENT_VERSION} is not available (set CURSOR_AGENT_BIN)`);
-    else if (!qaKey) say("native and live blocked: CUSTOMER_CURSOR_API_KEY (dedicated QA identity) is not set");
-    if (!agent || !qaKey) return;
+    else if (!env) say("native and live blocked: provision a QA key or sign the designated Aqua account into Cursor");
+    if (!env) return;
 
-    const context = { home, installed, work, version };
+    const context = { home, env, installed, work, version };
     results.native = await observeTurn(agent, { ...context, kind: "native" });
     results.policy_denial = await observeTurn(agent, { ...context, kind: "denial" });
     publish();
