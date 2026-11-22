@@ -130,3 +130,13 @@ test("only the operator-designated Cursor login may drive the isolated plugin", 
   assert.equal(agentEnvironment(agent, home).HOME, home);
   assert.equal(agentEnvironment(agent, home).CURSOR_API_KEY, "test-only");
 });
+
+test("reports missing correlated callbacks using only fixed names", async () => {
+  const { missingAllowCallbacks } = await import("../scripts/customer-published-acceptance");
+  const observed = (hook, changes = {}) => ({ hook, trace: true, ok: true, prediction: "BENIGN", ...changes });
+  const tools = [observed("tool_call"), observed("tool_response")];
+  assert.deepEqual(missingAllowCallbacks([...tools, observed("user_input", { trace: false }),
+    observed("user_input", { ok: false }), observed("user_input", { prediction: "MALICIOUS" }),
+    observed("private provider text")]), ["user_input"]);
+  assert.deepEqual(missingAllowCallbacks([...tools, observed("user_input", { prediction: "benign" })]), []);
+});
