@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { accessSync, constants, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -139,4 +139,31 @@ test("reports missing correlated callbacks using only fixed names", async () => 
     observed("user_input", { ok: false }), observed("user_input", { prediction: "MALICIOUS" }),
     observed("private provider text")]), ["user_input"]);
   assert.deepEqual(missingAllowCallbacks([...tools, observed("user_input", { prediction: "benign" })]), []);
+});
+
+test("discovers the exact Cursor release after auto-update and respects explicit selection", async (t) => {
+  const { pinnedAgent } = await import("../scripts/customer-published-acceptance");
+  const home = mkdtempSync(path.join(os.tmpdir(), "cursor-cli-selection-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const version = "2026.11.19-f005e9d";
+  const bin = path.join(home, "bin");
+  const pinned = path.join(home, ".local/share/cursor-agent/versions", version, "cursor-agent");
+  const launcher = path.join(bin, "agent");
+  const override = path.join(bin, "custom-agent");
+  function executable(file, reportedVersion) {
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, `#!/bin/sh\necho '${reportedVersion}'\n`, { mode: 0o700 });
+  }
+  const environment = { HOME: home, PATH: bin };
+  executable(launcher, "updated-version");
+  executable(pinned, version);
+  assert.equal(pinnedAgent(home, environment), pinned);
+  executable(override, version);
+  assert.equal(pinnedAgent(home, { ...environment, CURSOR_AGENT_BIN: override }), override);
+  assert.equal(pinnedAgent(home, { ...environment, CURSOR_AGENT_BIN: launcher }), undefined);
+  executable(launcher, version);
+  executable(pinned, "unexpected-version");
+  assert.equal(pinnedAgent(home, environment), launcher);
+  rmSync(pinned);
+  assert.equal(pinnedAgent(home, environment), launcher);
 });
