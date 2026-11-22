@@ -263,7 +263,8 @@ function startRecorder(upstream, upstreamKey, trace, denyRead, fileWord) {
 
 function runAgent(agent, { home, workspace, installed, prompt, log }) {
   return new Promise((resolve) => {
-    const child = spawn(agent, ["-p", "--output-format", "json", "--mode", "ask", "--workspace", workspace,
+    // observeTurn creates this private workspace and its only file. Headless Cursor requires explicit trust.
+    const child = spawn(agent, ["-p", "--output-format", "json", "--mode", "ask", "--trust", "--workspace", workspace,
       "--plugin-dir", installed, prompt], {
       cwd: workspace, stdio: ["ignore", "pipe", "pipe"],
       env: childEnvironment(home, { CURSOR_API_KEY: process.env.CUSTOMER_CURSOR_API_KEY, NO_COLOR: "1" }),
