@@ -20,6 +20,8 @@ import { createInterface } from "node:readline";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { CLASSIFY_RESPONSES, classifyDecision } from "./classify-responses.mjs";
+
 // Pinned Cursor CLI host. Any other version is not accepted as evidence.
 const AGENT_VERSION = "2026.11.19-f005e9d";
 const PLUGIN_DIRECTORY = "silmaril-firewall";
@@ -218,42 +220,73 @@ export function pinnedAgent(home, environment = process.env) {
   return undefined;
 }
 
-// Loopback classifier that records what the installed plugin really sent. With an upstream it forwards the
-// request unchanged (the credential is added here, never written to the plugin config) and records the result.
+const READ_POLICY_DENIAL = classifyDecision("block", {
+  source: "governance",
+  governance: { action: "block", rule_id: "qa-read-policy", policy_version: "1" },
+});
+
+export function upstreamEndpoint(upstream, pathname) {
+  const url = new URL(upstream);
+  url.pathname = url.pathname.replace(/\/$/u, "").replace(/\/(?:v2\/)?classify$/u, "") + pathname;
+  return url.href;
+}
+
+export function modelVerdict(text) {
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (Array.isArray(body?.results)) {
+    const { action, source } = body.results[0] ?? {};
+    if (typeof action !== "string") return undefined;
+    return action === "allow" || source === "governance" ? "benign" : "malicious";
+  }
+  const prediction = typeof body?.prediction === "string" ? body.prediction.toUpperCase() : undefined;
+  if (prediction !== "BENIGN" && prediction !== "MALICIOUS") return undefined;
+  return prediction.toLowerCase();
+}
+
+// Loopback classifier that records what the installed plugin really sent on /v2/classify and /classify. With an
+// upstream it forwards the request unchanged to the same path there (the credential is added here, never written
+// to the plugin config), relays the status so the plugin's own /classify fallback decides, and records the result.
 function startRecorder(upstream, upstreamKey, trace, denyRead, fileWord) {
   const seen = [];
   const server = http.createServer((request, response) => {
+    const render = CLASSIFY_RESPONSES[request.url];
+    if (!render) {
+      request.resume();
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ detail: "Not Found" }));
+      return;
+    }
     const chunks = [];
     request.on("data", (chunk) => chunks.push(chunk));
     request.on("end", async () => {
       let payload;
       let status = 200;
-      let body = JSON.stringify({ prediction: "BENIGN", score: 0.01, threshold: 0.5 });
+      let body;
       try {
         const raw = Buffer.concat(chunks).toString("utf8");
         payload = JSON.parse(raw);
         const deny = denyRead && payload.hook === "tool_call" && payload.text?.includes(trace);
-        if (deny) body = JSON.stringify({ prediction: "BENIGN", score: 0.01, threshold: 0.5,
-          governance: { action: "block", rule_id: "qa-read-policy", policy_version: "1" } });
+        body = JSON.stringify(render(deny ? READ_POLICY_DENIAL : classifyDecision("allow")));
         if (upstream) {
-          const forwarded = await fetch(upstream, {
+          const forwarded = await fetch(upstreamEndpoint(upstream, request.url), {
             method: "POST", redirect: "error", body: raw, signal: AbortSignal.timeout(8_000),
             headers: { "x-api-key": upstreamKey, "content-type": "application/json" },
           });
           status = forwarded.status;
           body = await forwarded.text();
         }
-        let prediction;
-        try {
-          prediction = JSON.parse(body).prediction;
-        } catch { /* not a classification */ }
         const conversation = payload.metadata?.conversationId;
         seen.push({
           session: typeof conversation === "string" && conversation.trim()
             ? crypto.createHash("sha256").update(`session:${conversation}`).digest("hex") : undefined,
           hook: payload.hook, trace: typeof payload.text === "string" && payload.text.includes(trace),
           deny, containsWord: payload.text?.includes(fileWord) === true,
-          ok: status >= 200 && status < 300, prediction: typeof prediction === "string" ? prediction : undefined,
+          ok: status >= 200 && status < 300, verdict: modelVerdict(body),
         });
       } catch {
         status = 502;
@@ -406,7 +439,7 @@ export function denialVisible(observations, response, fileWord) {
 // Report only fixed callback names. Payloads and vendor responses can contain tenant data.
 export function missingAllowCallbacks(observations, hooks = ["user_input", "tool_call", "tool_response"]) {
   return hooks.filter((hook) =>
-    !observations.some((r) => r.hook === hook && r.trace && r.ok && r.prediction?.toUpperCase() === "BENIGN"));
+    !observations.some((r) => r.hook === hook && r.trace && r.ok && r.verdict === "benign"));
 }
 
 export function canResumeTurn(turn, { complete, missing }, denied, observations) {
@@ -414,7 +447,7 @@ export function canResumeTurn(turn, { complete, missing }, denied, observations)
   const fingerprint = crypto.createHash("sha256").update(`session:${turn.session}`).digest("hex");
   if (!observations.some((r) => r.hook === "tool_call" && r.trace && r.session === fingerprint)) return false;
   if (denied && turn.disclosed) return false;
-  if (!observations.every((r) => r.ok && r.prediction?.toUpperCase() === "BENIGN")) return false;
+  if (!observations.every((r) => r.ok && r.verdict === "benign")) return false;
   if (denied) {
     return observations.some((r) => r.hook === "tool_call" && r.trace && r.deny)
       && !observations.some((r) => r.hook === "tool_response" && r.containsWord);
@@ -450,7 +483,7 @@ export async function verifyTurn(agent, { home, env, installed, work, version, k
       });
       const extra = recorder.seen.slice(beforeResume);
       if (turn.session !== originalSession || turn.toolUsed || extra.some((r) =>
-        r.hook === "tool_call" || r.hook === "tool_response" || !r.ok || r.prediction?.toUpperCase() !== "BENIGN")) {
+        r.hook === "tool_call" || r.hook === "tool_response" || !r.ok || r.verdict !== "benign")) {
         say(`${kind}: the continuation could not confirm the original answer without another tool call.`);
         return "FAIL";
       }

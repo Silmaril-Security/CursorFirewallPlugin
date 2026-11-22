@@ -50,7 +50,7 @@ function captureDependencies(results, events = [], calls = []) {
         calls.push({ text, options });
         const next = results.shift();
         if (next instanceof Error) throw next;
-        return next ?? { prediction: "BENIGN", score: 0.01, threshold: 0.5 };
+        return next ?? { action: "allow" };
       }
     },
     evidenceEmitter: async (event) => {
@@ -147,7 +147,7 @@ describe("macOS computer name provenance", { concurrency: 1 }, () => {
     await runCursorHook(
       hookInput(),
       BASE_ENV,
-      captureDependencies([{ prediction: "BENIGN" }], events, classifyCalls),
+      captureDependencies([{ action: "allow" }], events, classifyCalls),
     );
     const provenance = classifyCalls.find((call) => call.options).options.metadata.silmaril.provenance;
     assert.equal(settled, false);
@@ -345,7 +345,7 @@ describe("macOS computer name provenance", { concurrency: 1 }, () => {
       const output = await runCursorHook(
         hookInput(),
         { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" },
-        captureDependencies([{ prediction: "MALICIOUS", score: 0.99, threshold: 0.5 }]),
+        captureDependencies([{ action: "block", source: "model" }]),
       );
       assert.deepEqual(output, {
         continue: false,
@@ -383,7 +383,7 @@ describe("macOS computer name provenance", { concurrency: 1 }, () => {
     const output = await runCursorHook(
       hookInput(),
       { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" },
-      captureDependencies([{ prediction: "MALICIOUS", score: 0.99, threshold: 0.5 }], [], calls),
+      captureDependencies([{ action: "block", source: "model" }], [], calls),
     );
     const provenance = calls.find((call) => call.options).options.metadata.silmaril.provenance;
     assert.ok(closes >= 1);
@@ -407,7 +407,7 @@ describe("macOS computer name provenance", { concurrency: 1 }, () => {
     const fallback = await runCursorHook(
       hookInput(),
       { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" },
-      captureDependencies([{ prediction: "MALICIOUS", score: 0.99, threshold: 0.5 }]),
+      captureDependencies([{ action: "block", source: "model" }]),
     );
     assert.deepEqual(fallback, {
       continue: false,
@@ -614,7 +614,7 @@ describe("macOS computer name provenance", { concurrency: 1 }, () => {
     const output = await runCursorHook(
       hookInput(),
       BASE_ENV,
-      captureDependencies([{ prediction: "BENIGN" }], [], calls),
+      captureDependencies([{ action: "allow" }], [], calls),
     );
     assert.equal(calls.some((call) => call.options), true);
     assert.equal(output, undefined);

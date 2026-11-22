@@ -26,6 +26,8 @@ import {
   openBrowser,
   optionValue,
 } from "../scripts/open-playground.mjs";
+import { CLASSIFY_RESPONSES, classifyDecision } from "../scripts/classify-responses.mjs";
+import { withMockClassifier } from "./mock-classifier.mjs";
 
 setMacDeviceNameLookupForTests({ platform: "linux" });
 
@@ -58,7 +60,7 @@ function fakeFirewall(results, calls = []) {
       calls.push({ text, options });
       const next = results.shift();
       if (next instanceof Error) throw next;
-      return next ?? { prediction: "BENIGN", score: 0.01, threshold: 0.5 };
+      return next ?? { action: "allow" };
     }
     async classifyBatch(texts, options) {
       calls.push({ texts, options });
@@ -75,49 +77,128 @@ function captureDependencies(results, events = [], calls = []) {
 }
 
 test("configured pilot override wins and backend mode controls otherwise", () => {
-  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "warn" }, "block"), "block");
-  assert.equal(effectiveMode({ prediction: "MALICIOUS" }, "block"), "block");
-  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "block" }, "warn"), "warn");
-  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "warn" }, "shadow"), "shadow");
-  assert.equal(effectiveMode({ prediction: "MALICIOUS", mode: "warn" }), "warn");
-  assert.equal(effectiveMode({ prediction: "MALICIOUS" }), "shadow");
+  assert.equal(effectiveMode({ action: "block", mode: "warn" }, "block"), "block");
+  assert.equal(effectiveMode({ action: "block" }, "block"), "block");
+  assert.equal(effectiveMode({ action: "block", mode: "block" }, "warn"), "warn");
+  assert.equal(effectiveMode({ action: "block", mode: "warn" }, "shadow"), "shadow");
+  assert.equal(effectiveMode({ action: "block", mode: "warn" }), "warn");
+  assert.equal(effectiveMode({ action: "block" }), "shadow");
 });
 
-test("bundled SDK enforces backend-selected Block when local mode is omitted", async () => {
-  const originalFetch = globalThis.fetch;
-  const requestBodies = [];
-  globalThis.fetch = async (_input, init) => {
-    requestBodies.push(JSON.parse(String(init?.body)));
-    return new Response(JSON.stringify({
-      prediction: "MALICIOUS",
-      score: 0.99,
-      threshold: 0.5,
-      mode: "block",
-    }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  };
+const MODEL_BLOCK = classifyDecision("block", {
+  source: "model",
+  confidence: "high",
+  severity: "critical",
+  outcome: "secret_exposure",
+  model_id: "silmaril-cascade-1-6",
+});
+const GOVERNANCE_BLOCK = classifyDecision("block", {
+  source: "governance",
+  governance: { action: "block", rule_id: "block-shell", policy_version: "v1" },
+});
+const FALLBACK_ONLY = { "/classify": CLASSIFY_RESPONSES["/classify"] };
+const VERSION_1_ON_VERSION_2_PATH = { "/v2/classify": CLASSIFY_RESPONSES["/classify"] };
+const BLOCKED_PROMPT = {
+  continue: false,
+  user_message: "Silmaril Firewall blocked potentially malicious content.",
+};
 
-  const env = { ...BASE_ENV };
-  delete env.SILMARIL_BLOCK_MALICIOUS;
+async function runAgainstMockClassifier(options, env = {}) {
   const events = [];
-  try {
-    const output = await runCursorHook(
+  let output;
+  let paths;
+  await withMockClassifier(async (apiUrl, requests) => {
+    output = await runCursorHook(
       hookInput("beforeSubmitPrompt", { prompt: "unsafe prompt" }),
-      env,
+      { ...BASE_ENV, SILMARIL_API_URL: `${apiUrl}/classify`, ...env },
       { evidenceEmitter: async (event) => { events.push(event); } },
     );
-    assert.deepEqual(output, {
-      continue: false,
-      user_message: "Silmaril Firewall blocked potentially malicious content.",
-    });
-    assert.equal(requestBodies.length, 1);
-    assert.equal(Object.hasOwn(requestBodies[0], "mode"), false);
-    assert.equal(events[0].mode, "block");
-    assert.equal(events[0].policyDecision, "block");
-  } finally {
-    globalThis.fetch = originalFetch;
+    paths = requests.map((request) => request.path);
+    assert.ok(requests.every(({ payload }) => payload.text === "unsafe prompt"));
+  }, options);
+  return { output, paths, events };
+}
+
+test("bundled SDK enforces a version 2 block and records its confidence and severity", async () => {
+  const { output, paths, events } = await runAgainstMockClassifier(
+    { decision: MODEL_BLOCK },
+    { SILMARIL_MODE: "block" },
+  );
+  assert.deepEqual(output, BLOCKED_PROMPT);
+  assert.deepEqual(paths, ["/v2/classify"]);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].prediction, "malicious");
+  assert.equal(events[0].confidence, "high");
+  assert.equal(events[0].severity, "critical");
+  assert.equal(events[0].riskClass, "credential_exposure");
+  assert.equal(events[0].policyDecision, "block");
+  assert.equal(events[0].nativeAction, "block_returned");
+});
+
+test("bundled SDK enforces a block through the /classify fallback and from a version 1 body on /v2/classify", async () => {
+  for (const [responses, expectedPaths] of [
+    [FALLBACK_ONLY, ["/v2/classify", "/classify"]],
+    [VERSION_1_ON_VERSION_2_PATH, ["/v2/classify"]],
+  ]) {
+    for (const [decision, prediction] of [[MODEL_BLOCK, "malicious"], [GOVERNANCE_BLOCK, "benign"]]) {
+      const { output, paths, events } = await runAgainstMockClassifier(
+        { decision, responses },
+        { SILMARIL_MODE: "block" },
+      );
+      assert.deepEqual(output, BLOCKED_PROMPT);
+      assert.deepEqual(paths, expectedPaths);
+      assert.equal(events.length, 1);
+      assert.equal(events[0].prediction, prediction);
+      assert.equal(events[0].policyDecision, "block");
+      assert.equal(events[0].nativeAction, "block_returned");
+      assert.equal(Object.hasOwn(events[0], "confidence"), false);
+      assert.equal(Object.hasOwn(events[0], "severity"), false);
+    }
+  }
+});
+
+test("bundled SDK allows an explicit allow on every classify version", async () => {
+  for (const responses of [CLASSIFY_RESPONSES, FALLBACK_ONLY, VERSION_1_ON_VERSION_2_PATH]) {
+    const { output, events } = await runAgainstMockClassifier({ responses }, { SILMARIL_MODE: "block" });
+    assert.equal(output, undefined);
+    assert.equal(events[0].prediction, "benign");
+    assert.equal(events[0].policyDecision, "allow");
+  }
+});
+
+test("a version 1 response mode selects Block when local mode is omitted and a version 2 response leaves Shadow", async () => {
+  const env = { SILMARIL_BLOCK_MALICIOUS: undefined };
+  const withBackendBlock = (decision) => ({ ...CLASSIFY_RESPONSES["/classify"](decision), mode: "block" });
+  const legacy = await runAgainstMockClassifier(
+    { decision: MODEL_BLOCK, responses: { "/classify": withBackendBlock } },
+    env,
+  );
+  assert.deepEqual(legacy.output, BLOCKED_PROMPT);
+  assert.equal(legacy.events[0].mode, "block");
+  assert.equal(legacy.events[0].policyDecision, "block");
+
+  const current = await runAgainstMockClassifier({ decision: MODEL_BLOCK }, env);
+  assert.equal(current.output, undefined);
+  assert.equal(current.events[0].mode, "shadow");
+  assert.equal(current.events[0].policyDecision, "monitor");
+});
+
+test("bundled SDK rejects malformed classify responses and the hook fails open without evidence", async () => {
+  for (const responses of [
+    { "/v2/classify": () => ({ results: [{ ...MODEL_BLOCK, action: 1 }] }) },
+    { "/v2/classify": () => ({ results: [] }) },
+    { "/v2/classify": () => ({ results: [MODEL_BLOCK, MODEL_BLOCK] }) },
+    { "/v2/classify": () => ({ verdict: "MALICIOUS" }) },
+    { "/classify": () => ({ prediction: "UNKNOWN" }) },
+    { "/classify": (decision) => ({ ...CLASSIFY_RESPONSES["/classify"](decision), mode: "enforce" }) },
+    {},
+  ]) {
+    const { output, events } = await runAgainstMockClassifier(
+      { decision: MODEL_BLOCK, responses },
+      { SILMARIL_MODE: "block" },
+    );
+    assert.equal(output, undefined);
+    assert.deepEqual(events, []);
   }
 });
 
@@ -312,7 +393,7 @@ test("runtime verification markers correlate with local evidence", async () => {
   await runCursorHook(
     hookInput("beforeSubmitPrompt", { prompt: `Reply with OK only. ${marker}` }),
     BASE_ENV,
-    captureDependencies([{ prediction: "BENIGN", score: 0.1, threshold: 0.5 }], events),
+    captureDependencies([{ action: "allow" }], events),
   );
   assert.equal(events.length, 1);
   assert.equal(
@@ -326,7 +407,7 @@ test("shadow mode observes without returning hook output", async () => {
   const output = await runCursorHook(
     hookInput("beforeSubmitPrompt", { prompt: "raw-shadow-secret" }),
     BASE_ENV,
-    captureDependencies([{ prediction: "MALICIOUS", score: 0.9, threshold: 0.5 }], events),
+    captureDependencies([{ action: "block", source: "model" }], events),
   );
   assert.equal(output, undefined);
   assert.equal(events[0].policyDecision, "monitor");
@@ -336,8 +417,9 @@ test("shadow mode observes without returning hook output", async () => {
 
 test("governance blocks deny only supported pre-execution hooks in block mode", async () => {
   const decision = {
-    prediction: "BENIGN",
-    governance: { action: "block", rule_id: "block-shell", policy_version: "v1" },
+    action: "block",
+    source: "governance",
+    governance: { action: "block", ruleId: "block-shell", policyVersion: "v1" },
   };
   const prompt = hookInput("beforeSubmitPrompt", { prompt: "prompt" });
 
@@ -366,29 +448,43 @@ test("governance blocks deny only supported pre-execution hooks in block mode", 
   );
 });
 
-test("only exact MALICIOUS blocks prompts and tools", async () => {
+test("only an explicit allow passes prompts and tools in block mode", async () => {
   const env = { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" };
   const promptOutput = await runCursorHook(
     hookInput("beforeSubmitPrompt", { prompt: "prompt" }),
     env,
-    captureDependencies([{ prediction: "MALICIOUS" }]),
+    captureDependencies([{ action: "block", source: "model" }]),
   );
-  assert.deepEqual(promptOutput, { continue: false, user_message: "Silmaril Firewall blocked potentially malicious content." });
+  assert.deepEqual(promptOutput, BLOCKED_PROMPT);
 
   const toolOutput = await runCursorHook(
     hookInput("preToolUse", { tool_name: "Shell", tool_input: { command: "command" } }),
     env,
-    captureDependencies([{ prediction: "MALICIOUS" }]),
+    captureDependencies([{ action: "block", source: "model" }]),
   );
   assert.equal(toolOutput.permission, "deny");
 
-  for (const prediction of ["malicious", "UNKNOWN", undefined]) {
+  assert.equal(await runCursorHook(
+    hookInput("beforeSubmitPrompt", { prompt: "prompt" }),
+    env,
+    captureDependencies([{ action: "allow", source: "model", confidence: "very_high", severity: "critical" }]),
+  ), undefined);
+
+  for (const [result, prediction] of [
+    [{ action: "ALLOW" }, "malicious"],
+    [{ action: "review" }, "malicious"],
+    [{ prediction: "BENIGN" }, "unavailable"],
+    [{}, "unavailable"],
+  ]) {
+    const events = [];
     const output = await runCursorHook(
       hookInput("beforeSubmitPrompt", { prompt: "prompt" }),
       env,
-      captureDependencies([{ prediction }]),
+      captureDependencies([result], events),
     );
-    assert.equal(output, undefined);
+    assert.deepEqual(output, BLOCKED_PROMPT);
+    assert.equal(events[0].prediction, prediction);
+    assert.equal(events[0].policyDecision, "block");
   }
 });
 
@@ -396,7 +492,7 @@ test("beforeReadFile blocks before model consumption", async () => {
   const output = await runCursorHook(
     hookInput("beforeReadFile", { file_path: "/private/secret", content: "untrusted" }),
     { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" },
-    captureDependencies([{ prediction: "MALICIOUS" }]),
+    captureDependencies([{ action: "block", source: "model" }]),
   );
   assert.equal(output.permission, "deny");
 });
@@ -407,13 +503,13 @@ test("postToolUse replaces MCP output while generic tools stay explicitly unavai
   const generic = await runCursorHook(
     hookInput("postToolUse", { tool_name: "Shell", tool_output: "unsafe" }),
     env,
-    captureDependencies([{ prediction: "MALICIOUS" }], events),
+    captureDependencies([{ action: "block", source: "model" }], events),
   );
   assert.equal(generic, undefined);
   const emptyMcp = await runCursorHook(
     hookInput("postToolUse", { tool_name: "MCP:", tool_output: "unsafe" }),
     env,
-    captureDependencies([{ prediction: "MALICIOUS" }], events),
+    captureDependencies([{ action: "block", source: "model" }], events),
   );
   assert.equal(emptyMcp, undefined);
   for (const identity of [
@@ -423,7 +519,7 @@ test("postToolUse replaces MCP output while generic tools stay explicitly unavai
     const mcp = await runCursorHook(
       hookInput("postToolUse", { ...identity, tool_output: "unsafe" }),
       env,
-      captureDependencies([{ prediction: "MALICIOUS" }], events),
+      captureDependencies([{ action: "block", source: "model" }], events),
     );
     assert.deepEqual(mcp, {
       updated_mcp_tool_output: { error: "Silmaril Firewall blocked potentially malicious content." },
@@ -454,7 +550,7 @@ test("hosted HTTP MCP redacted results bypass classification and replacement", a
       const output = await runCursorHook(
         input,
         { ...BASE_ENV, SILMARIL_MODE: mode },
-        captureDependencies([{ prediction: "MALICIOUS" }], events, calls),
+        captureDependencies([{ action: "block", source: "model" }], events, calls),
       );
       assert.equal(output, undefined);
       assert.equal(calls.length, 0);
@@ -484,7 +580,7 @@ test("hosted HTTP MCP redacted results bypass classification and replacement", a
     const nonMarker = await runCursorHook(
       input,
       { ...BASE_ENV, SILMARIL_MODE: "block" },
-      captureDependencies([{ prediction: "MALICIOUS" }], events, calls),
+      captureDependencies([{ action: "block", source: "model" }], events, calls),
     );
     assert.equal(nonMarker, undefined);
     const classificationCalls = calls.filter((call) => Object.hasOwn(call, "text"));
@@ -505,7 +601,7 @@ test("HTTP MCP pre-tool denial and local MCP replacement remain supported", asyn
       tool_input: { url: "https://example.test" },
     }),
     env,
-    captureDependencies([{ prediction: "MALICIOUS" }]),
+    captureDependencies([{ action: "block", source: "model" }]),
   );
   assert.equal(denied.permission, "deny");
 
@@ -516,7 +612,7 @@ test("HTTP MCP pre-tool denial and local MCP replacement remain supported", asyn
       tool_output: '{"redacted":true}',
     }),
     env,
-    captureDependencies([{ prediction: "MALICIOUS" }], [], calls),
+    captureDependencies([{ action: "block", source: "model" }], [], calls),
   );
   assert.equal(calls.filter((call) => Object.hasOwn(call, "text")).length, 1);
   assert.equal(local.updated_mcp_tool_output.error, "Silmaril Firewall blocked potentially malicious content.");
@@ -528,7 +624,7 @@ test("postToolUse local MCP replacement remains inactive in Shadow and Warn mode
     const output = await runCursorHook(
       hookInput("postToolUse", { tool_name: "mcp__github__fetch", tool_output: "unsafe" }),
       { ...BASE_ENV, SILMARIL_MODE: mode },
-      captureDependencies([{ prediction: "MALICIOUS" }], events),
+      captureDependencies([{ action: "block", source: "model" }], events),
     );
     assert.equal(output, undefined);
     assert.equal(events[0].mode, mode);
@@ -549,7 +645,7 @@ test("warn mode remains unchanged where Cursor cannot deliver same-turn context"
     hookInput("postToolUse", { tool_name: "Shell", tool_output: "raw output" }),
   ]) {
     assert.equal(
-      await runCursorHook(input, env, captureDependencies([{ prediction: "MALICIOUS", mode: "warn" }], events)),
+      await runCursorHook(input, env, captureDependencies([{ action: "block", source: "model", mode: "warn" }], events)),
       undefined,
     );
   }
@@ -557,7 +653,7 @@ test("warn mode remains unchanged where Cursor cannot deliver same-turn context"
   assert.doesNotMatch(JSON.stringify(events), /raw prompt|raw args|raw output/u);
 });
 
-test("configuration, network, timeout, SDK, and malformed-response paths fail open", async () => {
+test("configuration, network, timeout, and SDK failure paths fail open", async () => {
   assert.equal(await runCursorHook(hookInput("beforeSubmitPrompt", { prompt: "text" }), {}), undefined);
   const timeout = new Error("request timed out");
   timeout.name = "TimeoutError";
@@ -568,11 +664,6 @@ test("configuration, network, timeout, SDK, and malformed-response paths fail op
       captureDependencies([failure]),
     ), undefined);
   }
-  assert.equal(await runCursorHook(
-    hookInput("beforeSubmitPrompt", { prompt: "text" }),
-    { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" },
-    captureDependencies([{ unexpected: "response" }]),
-  ), undefined);
 });
 
 test("assistant output does not use replacement or follow-up as a block", async () => {
@@ -583,7 +674,7 @@ test("assistant output does not use replacement or follow-up as a block", async 
     hookInput("afterAgentResponse", { text: "raw assistant output" }),
     env,
     {
-      ...captureDependencies([{ prediction: "MALICIOUS", score: 0.8, threshold: 0.5 }], firstEvents),
+      ...captureDependencies([{ action: "block", source: "model" }], firstEvents),
       decisionWriter: async (conversationId, generationId, result) => {
         writes.push({ conversationId, generationId, result });
         return true;
@@ -603,13 +694,12 @@ test("assistant output does not use replacement or follow-up as a block", async 
     {
       evidenceEmitter: async (event) => { stopEvents.push(event); },
       decisionConsumer: async () => ({
-        version: 1,
+        version: 2,
         createdAt: new Date().toISOString(),
         conversationFingerprint: "fingerprint",
         generationFingerprint: "fingerprint",
-        prediction: "MALICIOUS",
-        score: 0.8,
-        threshold: 0.5,
+        action: "block",
+        source: "model",
       }),
     },
   );
@@ -620,18 +710,57 @@ test("assistant output does not use replacement or follow-up as a block", async 
 test("decision cache is private, bounded, single-use, and expires", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-cache-"));
   const now = new Date("2026-08-10T12:00:00.000Z");
-  assert.equal(await writeOutputDecision("c1", "g1", { prediction: "MALICIOUS", primaryOutcome: "code_execution" }, { directory: root, now }), true);
+  const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+  const identity = (conversationId, generationId) => ({
+    createdAt: now.toISOString(),
+    conversationFingerprint: sha256(`conversation:${conversationId}`),
+    generationFingerprint: sha256(`generation:${generationId}`),
+  });
+  assert.equal(await writeOutputDecision("c1", "g1", {
+    action: "block",
+    source: "model",
+    confidence: "high",
+    severity: "critical",
+    outcome: "secret_exposure",
+    modelId: "silmaril-cascade-1-6",
+  }, { directory: root, now }), true);
   const files = await import("node:fs/promises").then(({ readdir }) => readdir(root));
   assert.equal(files.length, 1);
   assert.equal((await stat(path.join(root, files[0]))).mode & 0o777, 0o600);
-  assert.equal((await consumeOutputDecision("c1", "g1", { directory: root, now })).prediction, "MALICIOUS");
+  assert.deepEqual(await consumeOutputDecision("c1", "g1", { directory: root, now }), {
+    version: 2,
+    ...identity("c1", "g1"),
+    action: "block",
+    source: "model",
+    confidence: "high",
+    severity: "critical",
+    outcome: "secret_exposure",
+  });
   assert.equal(await consumeOutputDecision("c1", "g1", { directory: root, now }), undefined);
 
-  await writeOutputDecision("c2", "g2", { prediction: "MALICIOUS" }, { directory: root, now });
+  assert.equal(await writeOutputDecision("c5", "g5", { action: "allow" }, { directory: root, now }), false);
+  assert.equal(await consumeOutputDecision("c5", "g5", { directory: root, now }), undefined);
+
+  for (const fields of [
+    { version: 1, prediction: "MALICIOUS", score: 0.99, threshold: 0.5, primaryOutcome: "secret_exposure" },
+    { version: 2, prediction: "MALICIOUS" },
+    { version: 2, action: "allow" },
+    { version: 2, action: "block", confidence: "certain" },
+    { version: 2, action: "block", severity: 5 },
+    { version: 2, action: "block", source: "" },
+    { version: 2, action: "block", outcome: "secret exposure" },
+  ]) {
+    const entry = path.join(root, `decision-${sha256("c6\u0000g6")}.json`);
+    await writeFile(entry, JSON.stringify({ ...identity("c6", "g6"), ...fields }), { mode: 0o600 });
+    assert.equal(await consumeOutputDecision("c6", "g6", { directory: root, now }), undefined);
+    await assert.rejects(stat(entry), { code: "ENOENT" });
+  }
+
+  await writeOutputDecision("c2", "g2", { action: "block", source: "model" }, { directory: root, now });
   assert.equal(await consumeOutputDecision("c2", "g2", { directory: root, now: new Date(now.getTime() + 11 * 60 * 1000) }), undefined);
 
-  await writeOutputDecision("c3", "g3", { prediction: "MALICIOUS" }, { directory: root, now });
-  await writeOutputDecision("c4", "g4", { prediction: "MALICIOUS" }, { directory: root, now: new Date(now.getTime() + 11 * 60 * 1000) });
+  await writeOutputDecision("c3", "g3", { action: "block", source: "model" }, { directory: root, now });
+  await writeOutputDecision("c4", "g4", { action: "block", source: "model" }, { directory: root, now: new Date(now.getTime() + 11 * 60 * 1000) });
   const remaining = await import("node:fs/promises").then(({ readdir }) => readdir(root));
   assert.equal(remaining.length, 1);
 });
@@ -661,7 +790,7 @@ test("subagent stop classifies only the current summary and never replays transc
   const output = await runCursorHook(
     input,
     { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" },
-    captureDependencies([{ prediction: "MALICIOUS" }], events, calls),
+    captureDependencies([{ action: "block", source: "model" }], events, calls),
   );
   assert.equal(output, undefined);
   assert.equal(events.length, 1);
@@ -678,16 +807,32 @@ test("local evidence is redacted and written atomically with private permissions
   const root = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-evidence-"));
   const event = buildLocalProtectionEvent({
     pluginName: "cursor-firewall-plugin",
-    pluginVersion: "0.3.5",
+    pluginVersion: "0.4.0",
     hook: "user_input",
     mode: "block",
     requestId: "raw-request-id",
     sessionId: "raw-session-id",
     toolName: "Shell",
-    classification: { prediction: "MALICIOUS", score: 0.9, threshold: 0.5, primaryOutcome: "code_execution", raw: "must-not-leak" },
+    classification: {
+      action: "block",
+      source: "model",
+      confidence: "very_high",
+      severity: "moderate",
+      outcome: "secret_exposure",
+      score: 0.9,
+      threshold: 0.5,
+      raw: "must-not-leak",
+    },
     policyDecision: "block",
     nativeAction: "block_returned",
   });
+  assert.equal(event.schemaVersion, 1);
+  assert.equal(event.prediction, "malicious");
+  assert.equal(event.confidence, "very_high");
+  assert.equal(event.severity, "moderate");
+  assert.equal(event.riskClass, "credential_exposure");
+  assert.equal(Object.hasOwn(event, "modelScore"), false);
+  assert.equal(Object.hasOwn(event, "modelThreshold"), false);
   const destination = await writeLocalProtectionEvent(event, { SILMARIL_LOCAL_EVENT_DIR: root });
   assert.ok(destination);
   const encoded = await readFile(destination, "utf8");
@@ -706,11 +851,45 @@ test("local evidence is redacted and written atomically with private permissions
     hookInput("preToolUse", { tool_name: "Shell", tool_input: { command: "pwd" } }),
     { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" },
     {
-      ...captureDependencies([{ prediction: "MALICIOUS" }]),
+      ...captureDependencies([{ action: "block", source: "model" }]),
       evidenceEmitter: async () => { throw new Error("disk failure"); },
     },
   );
   assert.equal(output.permission, "deny");
+});
+
+test("local evidence keeps only closed confidence and severity labels and derives the prediction", () => {
+  const build = (classification) => buildLocalProtectionEvent({
+    pluginName: "cursor-firewall-plugin",
+    pluginVersion: "0.4.0",
+    hook: "pre_tool",
+    mode: "block",
+    classification,
+    policyDecision: "block",
+    nativeAction: "block_returned",
+  });
+  for (const classification of [
+    { action: "block", source: "model", confidence: "certain", severity: "severe" },
+    { action: "block", source: "model", confidence: "HIGH", severity: 4 },
+    { action: "block", source: "model", confidence: null, severity: null },
+    { action: "block", source: "model" },
+  ]) {
+    const event = build(classification);
+    assert.equal(Object.hasOwn(event, "confidence"), false);
+    assert.equal(Object.hasOwn(event, "severity"), false);
+    assert.equal(event.prediction, "malicious");
+    assert.equal(event.riskClass, "unknown");
+  }
+  for (const confidence of ["very_low", "low", "medium", "high", "very_high"]) {
+    assert.equal(build({ action: "block", source: "model", confidence }).confidence, confidence);
+  }
+  for (const severity of ["minimal", "low", "moderate", "high", "critical"]) {
+    assert.equal(build({ action: "block", source: "model", severity }).severity, severity);
+  }
+  assert.equal(build({ action: "allow" }).prediction, "benign");
+  assert.equal(build({ action: "block", source: "governance" }).prediction, "benign");
+  assert.equal(build({ action: "block" }).prediction, "malicious");
+  assert.equal(build({}).prediction, "unavailable");
 });
 
 test("demo launcher normalizes URLs and never returns the key", async () => {
@@ -744,9 +923,9 @@ test("package and Cursor manifests preserve release invariants", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const pluginJson = JSON.parse(await readFile(new URL("../.cursor-plugin/plugin.json", import.meta.url), "utf8"));
   const hooksJson = JSON.parse(await readFile(new URL("../hooks/hooks.json", import.meta.url), "utf8"));
-  assert.equal(packageJson.version, "0.3.5");
+  assert.equal(packageJson.version, "0.4.0");
   assert.equal(pluginJson.version, packageJson.version);
-  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "0.8.2");
+  assert.equal(packageJson.dependencies["@silmaril-security/sdk"], "1.0.0");
   assert.equal(packageJson.private, true);
   assert.equal(hooksJson.hooks.beforeSubmitPrompt[0].failClosed, false);
   assert.equal(hooksJson.hooks.subagentStop[0].loop_limit, 1);

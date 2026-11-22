@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0
+
+- Bundle SDK 1.0.0, which calls `/v2/classify` and falls back to `/classify` on deployments that predate it. Configuration is unchanged.
+- Treat every classify decision whose `action` is not `allow` as a block candidate, replacing the `MALICIOUS` prediction and governance action checks.
+- Record the Firewall's `confidence` and `severity` labels in local evidence when a block carries them, and stop recording `modelScore` and `modelThreshold`.
+- Store decision fields in the output decision cache under cache version 2 and discard version 1 entries.
+
 ## 0.3.5
 
 - Anchor every native hook command to `CURSOR_PLUGIN_ROOT` while retaining absolute commands in local installations.

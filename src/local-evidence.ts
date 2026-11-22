@@ -6,6 +6,8 @@ import path from "node:path";
 const MAX_EVENT_BYTES = 16 * 1024;
 const MAX_SAFE_VALUE_LENGTH = 128;
 const DEFAULT_DIRECTORY = ["Library", "Application Support", "Silmaril", "Evidence", "incoming"];
+export const CONFIDENCE_LEVELS = ["very_low", "low", "medium", "high", "very_high"] as const;
+export const SEVERITY_LEVELS = ["minimal", "low", "moderate", "high", "critical"] as const;
 
 export type ProtectionHook = "user_input" | "pre_tool" | "post_tool" | "tool_result" | "llm_output" | "subagent" | "unknown";
 export type ProtectionCategory = "credential_exposure" | "sensitive_data_exposure" | "code_execution" | "destructive_change" | "external_communication" | "privilege_change" | "unsafe_agent_control" | "other" | "unknown";
@@ -23,8 +25,8 @@ export type LocalProtectionEventV1 = {
   riskClass: ProtectionCategory;
   attemptedConsequence: { category: ProtectionCategory; summary: string };
   prediction: "benign" | "malicious" | "unknown" | "unavailable";
-  modelScore?: number;
-  modelThreshold?: number;
+  confidence?: (typeof CONFIDENCE_LEVELS)[number];
+  severity?: (typeof SEVERITY_LEVELS)[number];
   policyDecision: "allow" | "monitor" | "warn" | "block" | "unavailable";
   nativeAction: "none" | "allowed" | "block_returned" | "content_replaced" | "warning_context_returned" | "failed" | "unavailable";
   warnDelivery?: "delivered" | "unsupported";
@@ -72,8 +74,7 @@ const CONSEQUENCE_SUMMARIES: Record<ProtectionCategory, string> = {
 
 export function buildLocalProtectionEvent(input: LocalEvidenceInput): LocalProtectionEventV1 {
   const occurredAt = (input.occurredAt ?? new Date()).toISOString();
-  const prediction = normalizePrediction(input.classification.prediction);
-  const riskClass = normalizeCategory(input.classification.primaryOutcome ?? input.classification.primary_outcome);
+  const riskClass = normalizeCategory(input.classification.outcome);
   const event = {
     schemaVersion: 1,
     id: stableId("event", input.sessionId, input.requestId, occurredAt, randomUUID()),
@@ -87,9 +88,9 @@ export function buildLocalProtectionEvent(input: LocalEvidenceInput): LocalProte
     toolDisplayName: safeToolName(input.toolName),
     riskClass,
     attemptedConsequence: { category: riskClass, summary: CONSEQUENCE_SUMMARIES[riskClass] },
-    prediction,
-    modelScore: unitInterval(input.classification.score),
-    modelThreshold: unitInterval(input.classification.threshold),
+    prediction: normalizePrediction(input.classification),
+    confidence: CONFIDENCE_LEVELS.find((level) => level === input.classification.confidence),
+    severity: SEVERITY_LEVELS.find((level) => level === input.classification.severity),
     policyDecision: input.policyDecision,
     nativeAction: input.nativeAction,
     warnDelivery: input.warnDelivery,
@@ -149,11 +150,10 @@ export function resolveLocalEventDirectory(env: Record<string, string | undefine
   return path.join(configuredHome, ...DEFAULT_DIRECTORY);
 }
 
-function normalizePrediction(value: unknown): LocalProtectionEventV1["prediction"] {
-  if (value === "MALICIOUS") return "malicious";
-  if (value === "BENIGN") return "benign";
-  if (value === undefined || value === null) return "unavailable";
-  return "unknown";
+function normalizePrediction(classification: Record<string, unknown>): LocalProtectionEventV1["prediction"] {
+  if (classification.action === "allow") return "benign";
+  if (typeof classification.action !== "string") return "unavailable";
+  return classification.source === "governance" ? "benign" : "malicious";
 }
 
 function normalizeCategory(value: unknown): ProtectionCategory {
@@ -173,10 +173,6 @@ function normalizeCategory(value: unknown): ProtectionCategory {
     unsafe_agent_control: "unsafe_agent_control",
   };
   return mapping[normalized] ?? (normalized ? "other" : "unknown");
-}
-
-function unitInterval(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : undefined;
 }
 
 function safeToolName(value: unknown): string | undefined {

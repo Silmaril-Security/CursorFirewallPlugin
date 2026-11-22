@@ -50,6 +50,32 @@ test("a real lean install without QA or live credentials leaves native and live 
 });
 
 
+test("the recorder forwards each classify version to the same customer path and reads either response", async () => {
+  const { modelVerdict, upstreamEndpoint } = await import("../scripts/customer-published-acceptance");
+  const { CLASSIFY_RESPONSES, classifyDecision } = await import("../scripts/classify-responses.mjs");
+  for (const configured of ["/prod/classify", "/prod/classify/", "/prod/v2/classify", "/prod", "/prod/"]) {
+    const upstream = `https://customer.invalid${configured}?tenant=qa`;
+    assert.equal(upstreamEndpoint(upstream, "/v2/classify"), "https://customer.invalid/prod/v2/classify?tenant=qa");
+    assert.equal(upstreamEndpoint(upstream, "/classify"), "https://customer.invalid/prod/classify?tenant=qa");
+  }
+
+  const governance = { action: "block", rule_id: "qa-read-policy", policy_version: "1" };
+  for (const [decision, verdict] of [
+    [classifyDecision("allow"), "benign"],
+    [classifyDecision("block", { source: "model", outcome: "secret_exposure" }), "malicious"],
+    [classifyDecision("block", { source: "governance", governance }), "benign"],
+  ]) {
+    for (const render of Object.values(CLASSIFY_RESPONSES)) {
+      assert.equal(modelVerdict(JSON.stringify(render(decision))), verdict);
+    }
+  }
+  assert.equal(modelVerdict(JSON.stringify({ results: [{ action: "review" }] })), "malicious");
+  assert.equal(modelVerdict('{"prediction":"benign"}'), "benign");
+  for (const unreadable of ["", "not json", "null", "{}", '{"results":[]}', '{"results":[{"action":1}]}', '{"prediction":"UNKNOWN"}', '{"detail":"Not Found"}']) {
+    assert.equal(modelVerdict(unreadable), undefined);
+  }
+});
+
 test("the client denial requires the actual rule decision and withholds the unprompted file value", async () => {
   const { denialVisible } = await import("../scripts/customer-published-acceptance");
   const denied = { hook: "tool_call", trace: true, deny: true, ok: true };
@@ -133,12 +159,12 @@ test("only the operator-designated Cursor login may drive the isolated plugin", 
 
 test("reports missing correlated callbacks using only fixed names", async () => {
   const { missingAllowCallbacks } = await import("../scripts/customer-published-acceptance");
-  const observed = (hook, changes = {}) => ({ hook, trace: true, ok: true, prediction: "BENIGN", ...changes });
+  const observed = (hook, changes = {}) => ({ hook, trace: true, ok: true, verdict: "benign", ...changes });
   const tools = [observed("tool_call"), observed("tool_response")];
   assert.deepEqual(missingAllowCallbacks([...tools, observed("user_input", { trace: false }),
-    observed("user_input", { ok: false }), observed("user_input", { prediction: "MALICIOUS" }),
+    observed("user_input", { ok: false }), observed("user_input", { verdict: "malicious" }),
     observed("private provider text")]), ["user_input"]);
-  assert.deepEqual(missingAllowCallbacks([...tools, observed("user_input", { prediction: "benign" })]), []);
+  assert.deepEqual(missingAllowCallbacks([...tools, observed("user_input")]), []);
 });
 
 test("discovers the exact Cursor release after auto-update and respects explicit selection", async (t) => {
@@ -171,7 +197,7 @@ test("discovers the exact Cursor release after auto-update and respects explicit
 test("the pinned CLI may omit only prompt coverage from a completed read or denial", async () => {
   const { assessTurnEvidence } = await import("../scripts/customer-published-acceptance");
   const pin = "2026.11.19-f005e9d";
-  const callback = (hook) => ({ hook, session: "this-turn", trace: true, ok: true, prediction: "BENIGN" });
+  const callback = (hook) => ({ hook, session: "this-turn", trace: true, ok: true, verdict: "benign" });
   const event = (hook, denied = false) => ({
     hook, host: "cursor", provenance: { pluginVersion: version }, sessionFingerprint: "this-turn",
     mode: "block", prediction: "benign", policyDecision: denied ? "block" : "allow",
@@ -203,7 +229,7 @@ test("only a verified read or denial can resume its own interrupted conversation
   const session = "d6fdc7a2-8346-4bf8-a698-a02ddbe322df";
   const fingerprint = createHash("sha256").update(`session:${session}`).digest("hex");
   const turn = { code: 1, session, valid: true, reconnecting: true, disclosed: false };
-  const call = { session: fingerprint, hook: "tool_call", trace: true, deny: false, ok: true, prediction: "BENIGN" };
+  const call = { session: fingerprint, hook: "tool_call", trace: true, deny: false, ok: true, verdict: "benign" };
   const response = { ...call, hook: "tool_response", containsWord: true };
   const evidence = { complete: true, missing: [] };
   const eligible = (t, e = evidence, rows = [call, response]) => canResumeTurn(t, e, false, rows);

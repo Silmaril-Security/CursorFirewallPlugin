@@ -2,21 +2,24 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { CONFIDENCE_LEVELS, SEVERITY_LEVELS } from "./local-evidence.js";
 
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
+const EVIDENCE_FIELDS = ["source", "confidence", "severity", "outcome"] as const;
 const DEFAULT_TTL_MS = 10 * 60 * 1000;
 const MAX_CACHE_BYTES = 4 * 1024;
 const MAX_CACHE_FILES_SCANNED = 128;
 
 export type CachedOutputDecision = {
-  version: 1;
+  version: typeof CACHE_VERSION;
   createdAt: string;
   conversationFingerprint: string;
   generationFingerprint: string;
-  prediction: "MALICIOUS";
-  score?: number;
-  threshold?: number;
-  primaryOutcome?: string;
+  action: "block";
+  source?: string;
+  confidence?: (typeof CONFIDENCE_LEVELS)[number];
+  severity?: (typeof SEVERITY_LEVELS)[number];
+  outcome?: string;
 };
 
 export async function writeOutputDecision(
@@ -25,16 +28,15 @@ export async function writeOutputDecision(
   classification: Record<string, unknown>,
   options: { directory?: string; now?: Date } = {},
 ): Promise<boolean> {
+  if (classification.action === "allow") return false;
   const directory = options.directory ?? defaultCacheDirectory();
   const decision = omitUndefined({
     version: CACHE_VERSION,
     createdAt: (options.now ?? new Date()).toISOString(),
     conversationFingerprint: fingerprint("conversation", conversationId),
     generationFingerprint: fingerprint("generation", generationId),
-    prediction: "MALICIOUS",
-    score: unitInterval(classification.score),
-    threshold: unitInterval(classification.threshold),
-    primaryOutcome: boundedOutcome(classification.primaryOutcome ?? classification.primary_outcome),
+    action: "block",
+    ...decisionEvidence(classification),
   }) as CachedOutputDecision;
   const body = Buffer.from(`${JSON.stringify(decision)}\n`, "utf8");
   if (body.byteLength > MAX_CACHE_BYTES) return false;
@@ -126,21 +128,30 @@ function cacheFileName(conversationId: string, generationId: string): string {
 function isCachedDecision(value: unknown): value is CachedOutputDecision {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  return record.version === 1
-    && record.prediction === "MALICIOUS"
+  const evidence = decisionEvidence(record);
+  return record.version === CACHE_VERSION
+    && record.action === "block"
     && typeof record.createdAt === "string"
     && typeof record.conversationFingerprint === "string"
-    && typeof record.generationFingerprint === "string";
+    && typeof record.generationFingerprint === "string"
+    && EVIDENCE_FIELDS.every((field) => record[field] === evidence[field]);
 }
 
-function boundedOutcome(value: unknown): string | undefined {
+function decisionEvidence(
+  record: Record<string, unknown>,
+): Record<(typeof EVIDENCE_FIELDS)[number], string | undefined> {
+  return {
+    source: boundedLabel(record.source),
+    confidence: CONFIDENCE_LEVELS.find((level) => level === record.confidence),
+    severity: SEVERITY_LEVELS.find((level) => level === record.severity),
+    outcome: boundedLabel(record.outcome),
+  };
+}
+
+function boundedLabel(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const normalized = value.trim().replace(/[^A-Za-z0-9_.-]/gu, "_");
   return normalized ? normalized.slice(0, 128) : undefined;
-}
-
-function unitInterval(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : undefined;
 }
 
 function fingerprint(namespace: string, value: string): string {

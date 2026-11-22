@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
-import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { installLocalPlugin } from "../scripts/install-local.mjs";
+import { withMockClassifier } from "./mock-classifier.mjs";
 
 const sourceRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -87,27 +87,13 @@ test("installed stop hooks execute from an unrelated workspace with spaces in th
     assert.ok(entries.every(({ command }) => !command.includes("CURSOR_PLUGIN_ROOT")));
   }
 
-  const requests = [];
-  const server = http.createServer((request, response) => {
-    let body = "";
-    request.setEncoding("utf8");
-    request.on("data", (chunk) => { body += chunk; });
-    request.on("end", () => {
-      requests.push(JSON.parse(body));
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ prediction: "BENIGN", score: 0.01, threshold: 0.5 }));
-    });
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  try {
-    const address = server.address();
-    assert.ok(address && typeof address === "object");
+  await withMockClassifier(async (apiUrl, requests) => {
     const env = {
       ...process.env,
       HOME: workspace,
       SILMARIL_CONFIG_PATH: path.join(workspace, "missing-config.json"),
       SILMARIL_API_KEY: "test-key",
-      SILMARIL_API_URL: `http://127.0.0.1:${address.port}`,
+      SILMARIL_API_URL: apiUrl,
       SILMARIL_TIMEOUT_MS: "2500",
       SILMARIL_MODE: "shadow",
       SILMARIL_LOCAL_EVENT_DIR: path.join(workspace, "evidence"),
@@ -132,8 +118,6 @@ test("installed stop hooks execute from an unrelated workspace with spaces in th
     );
     assert.equal(subagentStopped.stdout, "");
     assert.equal(requests.length, 1);
-    assert.equal(requests[0].text, "installed summary");
-  } finally {
-    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-  }
+    assert.equal(requests[0].payload.text, "installed summary");
+  });
 });

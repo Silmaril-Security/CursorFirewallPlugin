@@ -2,7 +2,7 @@
 
 Silmaril Firewall lifecycle protection for Cursor agents and subagents.
 
-The plugin classifies host-visible prompts, tool calls, tool results, file reads, assistant output, reasoning blocks, and subagent activity with the bundled `@silmaril-security/sdk` 0.8.2. Shadow and Warn return no hook output. Block acts at native denial boundaries, and replaces malicious locally exposed MCP tool results, only for the exact prediction `MALICIOUS` or a governance action `block`. Other completed-output boundaries remain unchanged and record `block_unavailable`.
+The plugin classifies host-visible prompts, tool calls, tool results, file reads, assistant output, reasoning blocks, and subagent activity with the bundled `@silmaril-security/sdk` 1.0.0. Shadow and Warn return no hook output. Block acts at native denial boundaries, and replaces blocked locally exposed MCP tool results, for every classify decision whose `action` is not `allow`, whether the model or a governance policy decided it. Other completed-output boundaries remain unchanged and record `block_unavailable`.
 
 ## Install
 
@@ -89,7 +89,7 @@ Cursor Tab/inline-completion hooks are not included. Local plugin installation d
 
 ## Enforcement semantics
 
-Shadow and Warn return no hook output. Malicious Warn records `warnDelivery` as `unsupported`. Current responses omit mode, so omitting local mode and the legacy boolean selects shadow. Set `SILMARIL_MODE=block` for explicit enforcement, or use the legacy block boolean. Explicit mode wins over that boolean and over the backend mode. If the backend omits mode, the plugin uses shadow. A native block requires effective mode `block` and either `prediction === "MALICIOUS"` or governance `action` `block`. Other prediction strings do not block by themselves.
+Shadow and Warn return no hook output. Malicious Warn records `warnDelivery` as `unsupported`. Current responses omit mode, so omitting local mode and the legacy boolean selects shadow. Set `SILMARIL_MODE=block` for explicit enforcement, or use the legacy block boolean. Explicit mode wins over that boolean and over the backend mode. If the backend omits mode, the plugin uses shadow. A native block requires effective mode `block` and a classify decision whose `action` is anything other than `allow`. Model and governance blocks both arrive through that field.
 
 Post-execution hooks cannot undo tool side effects. Block replaces a malicious local/canonical MCP result with `updated_mcp_tool_output` and the same safe message in `additional_context` before model reuse. Cursor Cloud HTTP MCP `postToolUse` events expose only `{ "redacted": true }` (optionally with `isError`), so the plugin does not classify that placeholder or return replacement output; it records classification, policy decision, and native action as unavailable. Generic tool results and other unsupported completed-output boundaries remain unchanged and record `block_unavailable`.
 
@@ -101,7 +101,7 @@ Each completed classification emits a bounded `LocalProtectionEventV1` record to
 ~/Library/Application Support/Silmaril/Evidence/incoming
 ```
 
-The spool directory is private (`0700`), files are private (`0600`), and each event is written to a temporary file before atomic rename. Events contain fingerprints, policy/native decisions, bounded consequence metadata, and version provenance. They never contain prompts, reasoning, assistant output, tool arguments/results, API keys, endpoints, transcripts, workspace paths, or user email. Evidence failures never change a Cursor decision.
+The spool directory is private (`0700`), files are private (`0600`), and each event is written to a temporary file before atomic rename. Events contain fingerprints, policy/native decisions, bounded consequence metadata, and version provenance. A block records the Firewall's `confidence` and `severity` labels when the decision carries them; events no longer carry a model score or threshold. They never contain prompts, reasoning, assistant output, tool arguments/results, API keys, endpoints, transcripts, workspace paths, or user email. Evidence failures never change a Cursor decision.
 
 ## Demo
 
@@ -126,7 +126,7 @@ npm run pack:dry
 npm run install:local
 ```
 
-The committed `dist/cursor-hook.js` is rebuilt from TypeScript and bundles the pinned `@silmaril-security/sdk@0.8.2`, so explicit local modes, compatible legacy response modes, canonical governance resources, and governance decisions are preserved and users do not need to install dependencies after cloning a release.
+The committed `dist/cursor-hook.js` is rebuilt from TypeScript and bundles the pinned `@silmaril-security/sdk@1.0.0`, which calls `/v2/classify` on the configured endpoint and falls back to `/classify` on deployments that predate it, so explicit local modes, compatible legacy response modes, canonical governance resources, and governance decisions are preserved and users do not need to install dependencies after cloning a release.
 
 ## Release acceptance
 
