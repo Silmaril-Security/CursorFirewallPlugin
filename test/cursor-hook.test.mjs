@@ -899,6 +899,32 @@ test("local evidence keeps only closed confidence and severity labels and derive
   assert.equal(build({}).prediction, "unavailable");
 });
 
+test("local evidence maps each harmful SDK outcome to its consequence category", () => {
+  const build = (outcome) => buildLocalProtectionEvent({
+    pluginName: "cursor-firewall-plugin",
+    pluginVersion: "0.4.0",
+    hook: "pre_tool",
+    mode: "block",
+    classification: { action: "block", source: "model", outcome },
+    policyDecision: "block",
+    nativeAction: "block_returned",
+  });
+  for (const [outcome, category] of [
+    ["secret_exposure", "credential_exposure"],
+    ["information_disclosure", "sensitive_data_exposure"],
+    ["system_compromise", "code_execution"],
+    ["service_disruption", "destructive_change"],
+    ["control_abuse", "unsafe_agent_control"],
+    ["prompt_injection", "unsafe_agent_control"],
+    ["code_generation", "other"],
+    [undefined, "unknown"],
+  ]) {
+    const event = build(outcome);
+    assert.equal(event.riskClass, category, String(outcome));
+    assert.equal(event.attemptedConsequence.category, category);
+  }
+});
+
 test("local evidence records the model and governance policy versions within the ingestion bounds", () => {
   const provenance = (classification) => buildLocalProtectionEvent({
     pluginName: "cursor-firewall-plugin",
