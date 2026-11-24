@@ -15,8 +15,9 @@ export async function withMockClassifier(
     request.on("end", () => {
       requests.push({ path: request.url, payload: JSON.parse(body) });
       const render = responses.get(request.url);
-      response.writeHead(render ? 200 : 404, { "content-type": "application/json" });
-      response.end(JSON.stringify(render ? render(decision) : { detail: "Not Found" }));
+      const routed = typeof render === "function";
+      response.writeHead(routed ? 200 : 404, { "content-type": "application/json" });
+      response.end(JSON.stringify(routed ? render(decision) : { detail: "Not Found" }));
     });
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));

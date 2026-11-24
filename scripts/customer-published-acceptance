@@ -257,7 +257,7 @@ export function startRecorder(upstream, upstreamKey, trace, denyRead, fileWord) 
   const seen = [];
   const server = http.createServer((request, response) => {
     const render = CLASSIFY_RESPONSES.get(request.url);
-    if (!render) {
+    if (typeof render !== "function") {
       request.resume();
       response.writeHead(404, { "content-type": "application/json" });
       response.end(JSON.stringify({ detail: "Not Found" }));
