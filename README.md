@@ -2,17 +2,17 @@
 
 Silmaril Firewall lifecycle protection for Cursor agents and subagents.
 
-The plugin classifies host-visible prompts, tool calls, tool results, file reads, assistant output, reasoning blocks, and subagent activity with the bundled `@silmaril-security/sdk` 0.8.2. Shadow and Warn return no hook output. Block acts at native denial boundaries, and replaces malicious locally exposed MCP tool results, only for the exact prediction `MALICIOUS` or a governance action `block`. Other completed-output boundaries remain unchanged and record `block_unavailable`.
+The plugin classifies host-visible prompts, tool calls, tool results, file reads, assistant output, reasoning blocks, and subagent activity with the bundled `@silmaril-security/sdk` 0.11.0. Shadow and Warn return no hook output. Block acts at native denial boundaries, and replaces malicious locally exposed MCP tool results, only for the exact prediction `MALICIOUS` or a governance action `block`. Other completed-output boundaries remain unchanged and record `block_unavailable`.
 
 ## Install
 
-Release [v0.3.5](https://github.com/Silmaril-Security/CursorFirewallPlugin/releases/tag/v0.3.5)
+Release [v0.3.6](https://github.com/Silmaril-Security/CursorFirewallPlugin/releases/tag/v0.3.6)
 is available. Check out that release and install a lean copy into Cursor's
 local plugin directory for a reproducible installation. Node.js 22 or newer is
 required:
 
 ```sh
-git clone --branch v0.3.5 --depth 1 https://github.com/Silmaril-Security/CursorFirewallPlugin.git
+git clone --branch v0.3.6 --depth 1 https://github.com/Silmaril-Security/CursorFirewallPlugin.git
 cd CursorFirewallPlugin
 npm ci
 npm run install:local
@@ -126,7 +126,7 @@ npm run pack:dry
 npm run install:local
 ```
 
-The committed `dist/cursor-hook.js` is rebuilt from TypeScript and bundles the pinned `@silmaril-security/sdk@0.8.2`, so explicit local modes, compatible legacy response modes, canonical governance resources, and governance decisions are preserved and users do not need to install dependencies after cloning a release.
+The committed `dist/cursor-hook.js` is rebuilt from TypeScript and bundles the pinned `@silmaril-security/sdk@0.11.0`, so explicit local modes, compatible legacy response modes, canonical governance resources, and governance decisions are preserved and users do not need to install dependencies after cloning a release.
 
 ## Release acceptance
 

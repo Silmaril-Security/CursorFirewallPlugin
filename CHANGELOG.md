@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.6
+
+- Bundle SDK 0.11.0, which names the tenant acceptable-use policy outcome `abuse` and validates verdict scores and thresholds strictly.
+
 ## 0.3.5
 
 - Anchor every native hook command to `CURSOR_PLUGIN_ROOT` while retaining absolute commands in local installations.
