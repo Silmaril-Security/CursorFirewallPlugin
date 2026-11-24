@@ -288,9 +288,9 @@ test("the driver resumes once and qualifies only a completed tool-free reply fro
     const [trace, word] = fs.readFileSync(note, "utf8").trim().split(" ");
     const classify = async () => {
       const config = JSON.parse(fs.readFileSync(HOME + "/.cursor/silmaril-firewall.json", "utf8"));
-      const response = await fetch(config.apiUrl, { method: "POST",
+      const response = await fetch(new URL("v2/classify", config.apiUrl), { method: "POST",
         body: JSON.stringify({ hook: "tool_call", text: trace, metadata: { conversationId: session } }) });
-      if ((await response.json()).governance?.action !== "block") throw new Error("expected denied read");
+      if ((await response.json()).results?.[0]?.governance?.action !== "block") throw new Error("expected denied read");
     };
     if (resume < 0) {
       await classify();
