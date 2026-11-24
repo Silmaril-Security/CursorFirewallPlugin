@@ -96,8 +96,8 @@ const GOVERNANCE_BLOCK = classifyDecision("block", {
   source: "governance",
   governance: { action: "block", rule_id: "block-shell", policy_version: "v1" },
 });
-const FALLBACK_ONLY = { "/classify": CLASSIFY_RESPONSES["/classify"] };
-const VERSION_1_ON_VERSION_2_PATH = { "/v2/classify": CLASSIFY_RESPONSES["/classify"] };
+const FALLBACK_ONLY = new Map([["/classify", CLASSIFY_RESPONSES.get("/classify")]]);
+const VERSION_1_ON_VERSION_2_PATH = new Map([["/v2/classify", CLASSIFY_RESPONSES.get("/classify")]]);
 const BLOCKED_PROMPT = {
   continue: false,
   user_message: "Silmaril Firewall blocked potentially malicious content.",
@@ -175,9 +175,9 @@ test("bundled SDK allows an explicit allow on every classify version", async () 
 
 test("a version 1 response mode selects Block when local mode is omitted and a version 2 response leaves Shadow", async () => {
   const env = { SILMARIL_BLOCK_MALICIOUS: undefined };
-  const withBackendBlock = (decision) => ({ ...CLASSIFY_RESPONSES["/classify"](decision), mode: "block" });
+  const withBackendBlock = (decision) => ({ ...CLASSIFY_RESPONSES.get("/classify")(decision), mode: "block" });
   const legacy = await runAgainstMockClassifier(
-    { decision: MODEL_BLOCK, responses: { "/classify": withBackendBlock } },
+    { decision: MODEL_BLOCK, responses: new Map([["/classify", withBackendBlock]]) },
     env,
   );
   assert.deepEqual(legacy.output, BLOCKED_PROMPT);
@@ -192,13 +192,13 @@ test("a version 1 response mode selects Block when local mode is omitted and a v
 
 test("bundled SDK rejects malformed classify responses and the hook fails open without evidence", async () => {
   for (const responses of [
-    { "/v2/classify": () => ({ results: [{ ...MODEL_BLOCK, action: 1 }] }) },
-    { "/v2/classify": () => ({ results: [] }) },
-    { "/v2/classify": () => ({ results: [MODEL_BLOCK, MODEL_BLOCK] }) },
-    { "/v2/classify": () => ({ verdict: "MALICIOUS" }) },
-    { "/classify": () => ({ prediction: "UNKNOWN" }) },
-    { "/classify": (decision) => ({ ...CLASSIFY_RESPONSES["/classify"](decision), mode: "enforce" }) },
-    {},
+    new Map([["/v2/classify", () => ({ results: [{ ...MODEL_BLOCK, action: 1 }] })]]),
+    new Map([["/v2/classify", () => ({ results: [] })]]),
+    new Map([["/v2/classify", () => ({ results: [MODEL_BLOCK, MODEL_BLOCK] })]]),
+    new Map([["/v2/classify", () => ({ verdict: "MALICIOUS" })]]),
+    new Map([["/classify", () => ({ prediction: "UNKNOWN" })]]),
+    new Map([["/classify", (decision) => ({ ...CLASSIFY_RESPONSES.get("/classify")(decision), mode: "enforce" })]]),
+    new Map(),
   ]) {
     const { output, events } = await runAgainstMockClassifier(
       { decision: MODEL_BLOCK, responses },

@@ -14,7 +14,7 @@ export async function withMockClassifier(
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => {
       requests.push({ path: request.url, payload: JSON.parse(body) });
-      const render = responses[request.url];
+      const render = responses.get(request.url);
       response.writeHead(render ? 200 : 404, { "content-type": "application/json" });
       response.end(JSON.stringify(render ? render(decision) : { detail: "Not Found" }));
     });

@@ -65,7 +65,7 @@ test("the recorder forwards each classify version to the same customer path and 
     [classifyDecision("block", { source: "model", outcome: "secret_exposure" }), "malicious"],
     [classifyDecision("block", { source: "governance", governance }), "benign"],
   ]) {
-    for (const render of Object.values(CLASSIFY_RESPONSES)) {
+    for (const render of CLASSIFY_RESPONSES.values()) {
       assert.equal(modelVerdict(JSON.stringify(render(decision))), verdict);
     }
   }
@@ -74,6 +74,41 @@ test("the recorder forwards each classify version to the same customer path and 
   for (const unreadable of ["", "not json", "null", "{}", '{"results":[]}', '{"results":[{"action":1}]}', '{"prediction":"UNKNOWN"}', '{"detail":"Not Found"}']) {
     assert.equal(modelVerdict(unreadable), undefined);
   }
+});
+
+test("the recorder judges a refused version 2 probe by its completed /classify fallback", async (t) => {
+  const http = await import("node:http");
+  const { canResumeTurn, startRecorder } = await import("../scripts/customer-published-acceptance");
+  const { CLASSIFY_RESPONSES, classifyDecision } = await import("../scripts/classify-responses.mjs");
+  const legacy = http.createServer((request, response) => {
+    request.resume();
+    if (request.url === "/prod/classify") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(CLASSIFY_RESPONSES.get("/classify")(classifyDecision("allow"))));
+      return;
+    }
+    response.writeHead(404, { "content-type": "text/html" });
+    response.end("<html>Not Found</html>");
+  });
+  await new Promise((resolve) => legacy.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => legacy.close(resolve)));
+  const recorder = await startRecorder(`http://127.0.0.1:${legacy.address().port}/prod/classify`, "test-only", "trace-1", false, "word");
+  t.after(recorder.close);
+  const session = "d6fdc7a2-8346-4bf8-a698-a02ddbe322df";
+  const classify = (pathname) => fetch(new URL(pathname.slice(1), recorder.url), {
+    method: "POST",
+    body: JSON.stringify({ hook: "tool_call", text: "read trace-1", metadata: { conversationId: session } }),
+  });
+
+  assert.equal((await classify("/v2/classify")).status, 404);
+  assert.deepEqual(recorder.seen, []);
+  assert.equal((await classify("/classify")).status, 200);
+  assert.deepEqual(recorder.seen.map(({ hook, ok, verdict }) => ({ hook, ok, verdict })), [
+    { hook: "tool_call", ok: true, verdict: "benign" },
+  ]);
+  const turn = { code: 1, session, valid: true, reconnecting: true, disclosed: false };
+  const response = { ...recorder.seen[0], hook: "tool_response", containsWord: true };
+  assert.equal(canResumeTurn(turn, { complete: true, missing: [] }, false, [...recorder.seen, response]), true);
 });
 
 test("the client denial requires the actual rule decision and withholds the unprompted file value", async () => {

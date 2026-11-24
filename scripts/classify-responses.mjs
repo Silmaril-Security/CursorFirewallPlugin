@@ -11,9 +11,9 @@ export function classifyDecision(action, evidence = {}) {
   };
 }
 
-export const CLASSIFY_RESPONSES = {
-  "/v2/classify": (decision) => ({ results: [decision] }),
-  "/classify": ({ source, outcome, governance, model_id: modelId }) => ({
+export const CLASSIFY_RESPONSES = new Map([
+  ["/v2/classify", (decision) => ({ results: [decision] })],
+  ["/classify", ({ source, outcome, governance, model_id: modelId }) => ({
     prediction: source === "model" ? "MALICIOUS" : "BENIGN",
     score: source === "model" ? 0.99 : 0.01,
     threshold: 0.5,
@@ -21,5 +21,5 @@ export const CLASSIFY_RESPONSES = {
     outcome_scores: outcome ? { [outcome]: 0.99 } : {},
     ...(governance ? { governance } : {}),
     ...(modelId ? { model_id: modelId } : {}),
-  }),
-};
+  })],
+]);

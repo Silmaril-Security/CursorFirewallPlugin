@@ -220,6 +220,7 @@ export function pinnedAgent(home, environment = process.env) {
   return undefined;
 }
 
+const VERSION_1_FALLBACK_STATUSES = new Set([403, 404, 405]);
 const READ_POLICY_DENIAL = classifyDecision("block", {
   source: "governance",
   governance: { action: "block", rule_id: "qa-read-policy", policy_version: "1" },
@@ -251,10 +252,11 @@ export function modelVerdict(text) {
 // Loopback classifier that records what the installed plugin really sent on /v2/classify and /classify. With an
 // upstream it forwards the request unchanged to the same path there (the credential is added here, never written
 // to the plugin config), relays the status so the plugin's own /classify fallback decides, and records the result.
-function startRecorder(upstream, upstreamKey, trace, denyRead, fileWord) {
+// A refused /v2/classify probe is relayed but not recorded: its /classify fallback is that classification.
+export function startRecorder(upstream, upstreamKey, trace, denyRead, fileWord) {
   const seen = [];
   const server = http.createServer((request, response) => {
-    const render = CLASSIFY_RESPONSES[request.url];
+    const render = CLASSIFY_RESPONSES.get(request.url);
     if (!render) {
       request.resume();
       response.writeHead(404, { "content-type": "application/json" });
@@ -281,7 +283,8 @@ function startRecorder(upstream, upstreamKey, trace, denyRead, fileWord) {
           body = await forwarded.text();
         }
         const conversation = payload.metadata?.conversationId;
-        seen.push({
+        const refusedProbe = request.url === "/v2/classify" && VERSION_1_FALLBACK_STATUSES.has(status);
+        if (!refusedProbe) seen.push({
           session: typeof conversation === "string" && conversation.trim()
             ? crypto.createHash("sha256").update(`session:${conversation}`).digest("hex") : undefined,
           hook: payload.hook, trace: typeof payload.text === "string" && payload.text.includes(trace),
