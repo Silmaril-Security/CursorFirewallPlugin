@@ -18,6 +18,7 @@ function withClassificationDeadline(timeoutMs, classify) {
 }
 
 // node_modules/@silmaril-security/sdk/dist/index.js
+import { AsyncLocalStorage } from "async_hooks";
 import { randomUUID } from "crypto";
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -192,7 +193,8 @@ var init_hooks = __esm({
       FirewallHook.LLM_START,
       FirewallHook.CHAT_MODEL_START,
       FirewallHook.TOOL_START,
-      FirewallHook.TOOL_END
+      FirewallHook.TOOL_END,
+      FirewallHook.LLM_END
     ]);
     INPUT_HOOKS = /* @__PURE__ */ new Set([
       FirewallHook.LLM_START,
@@ -230,6 +232,218 @@ function validateMode(value) {
 var init_modes = __esm({
   "src/modes.ts"() {
     "use strict";
+  }
+});
+function retryBudget(maxRetries) {
+  return Math.min(maxRetries, retryLimit.getStore() ?? maxRetries);
+}
+function conversationId(metadata) {
+  const value = metadata?.conversationId;
+  return typeof value === "string" && value.length > 0 ? value : void 0;
+}
+function validateLimit(name, value) {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`Firewall: ${name} must be a positive integer, got ${value}`);
+  }
+  return value;
+}
+function reportBackground(message, error) {
+  console.warn(`silmaril.firewall: ${message}`, ...error === void 0 ? [] : [error]);
+}
+function settled(gate, signal) {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal?.reason);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    void gate.then(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    });
+  });
+}
+async function alongside(check, run, discard = () => void 0) {
+  const running = Promise.resolve().then(run);
+  try {
+    const [result] = await Promise.all([running, check]);
+    return result;
+  } catch (error) {
+    running.then(discard, () => void 0);
+    throw error;
+  }
+}
+var DEFAULT_MAX_CONCURRENT;
+var DEFAULT_MAX_QUEUED;
+var BACKGROUND_RETRIES;
+var retryLimit;
+var PendingVerdicts;
+var Deferred;
+var init_pending = __esm({
+  "src/pending.ts"() {
+    "use strict";
+    DEFAULT_MAX_CONCURRENT = 32;
+    DEFAULT_MAX_QUEUED = 64;
+    BACKGROUND_RETRIES = 1;
+    retryLimit = new AsyncLocalStorage();
+    PendingVerdicts = class {
+      constructor(maxConcurrent, maxQueued) {
+        this.maxConcurrent = maxConcurrent;
+        this.maxQueued = maxQueued;
+      }
+      maxConcurrent;
+      maxQueued;
+      gates = /* @__PURE__ */ new Map();
+      depths = /* @__PURE__ */ new Map();
+      outstanding = /* @__PURE__ */ new Set();
+      waiting = [];
+      running = 0;
+      background = 0;
+      /**
+       * Start a classification the caller joins by awaiting the returned promise.
+       * An aborted signal stops it waiting for its turn; later classifications keep their order.
+       */
+      submit(call, conversation, signal) {
+        const pending = this.start(call, conversation, signal);
+        pending.catch(() => void 0);
+        return pending;
+      }
+      /** Start a classification nobody joins; failures are reported, never thrown. */
+      observe(call, conversation) {
+        const conversationFull = conversation !== void 0 && (this.depths.get(conversation) ?? 0) >= this.maxQueued;
+        if (conversationFull || this.background >= this.maxConcurrent * this.maxQueued) {
+          reportBackground("dropped background classification: queue is full");
+          return Promise.resolve(void 0);
+        }
+        this.background++;
+        const pending = this.start(() => retryLimit.run(BACKGROUND_RETRIES, call), conversation, void 0);
+        const release = () => {
+          this.background--;
+        };
+        pending.then(release, release);
+        return pending.catch((error) => {
+          reportBackground("background classification failed", error);
+          return void 0;
+        });
+      }
+      /** Wait until every classification started so far has finished. */
+      async drain() {
+        while (this.outstanding.size > 0) {
+          await Promise.allSettled([...this.outstanding]);
+        }
+      }
+      start(call, conversation, signal) {
+        const previous = conversation === void 0 ? void 0 : this.gates.get(conversation);
+        const pending = this.run(call, previous, signal);
+        this.outstanding.add(pending);
+        if (conversation !== void 0) {
+          const gate = Promise.allSettled([previous, pending]).then(() => void 0);
+          this.gates.set(conversation, gate);
+          this.depths.set(conversation, (this.depths.get(conversation) ?? 0) + 1);
+          void gate.then(() => {
+            if (this.gates.get(conversation) === gate) {
+              this.gates.delete(conversation);
+            }
+          });
+        }
+        const finish = () => {
+          this.outstanding.delete(pending);
+          if (conversation === void 0) {
+            return;
+          }
+          const depth = (this.depths.get(conversation) ?? 1) - 1;
+          if (depth > 0) {
+            this.depths.set(conversation, depth);
+          } else {
+            this.depths.delete(conversation);
+          }
+        };
+        pending.then(finish, finish);
+        return pending;
+      }
+      async run(call, previous, signal) {
+        signal?.throwIfAborted();
+        if (previous !== void 0) {
+          await settled(previous, signal);
+        }
+        await this.acquire(signal);
+        try {
+          return await call();
+        } finally {
+          const next = this.waiting.shift();
+          if (next) {
+            next();
+          } else {
+            this.running--;
+          }
+        }
+      }
+      acquire(signal) {
+        if (this.running < this.maxConcurrent) {
+          this.running++;
+          return Promise.resolve();
+        }
+        return new Promise((resolve, reject) => {
+          const onAbort = () => {
+            const position = this.waiting.indexOf(grant);
+            if (position >= 0) {
+              this.waiting.splice(position, 1);
+              reject(signal?.reason);
+            }
+          };
+          const grant = () => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+          };
+          this.waiting.push(grant);
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
+      }
+    };
+    Deferred = class {
+      scopes = /* @__PURE__ */ new Map();
+      add(scope, promise) {
+        const verdict = { promise, passed: false, failed: false, failure: void 0 };
+        promise.then(
+          () => {
+            verdict.passed = true;
+          },
+          (error) => {
+            verdict.failed = true;
+            verdict.failure = error;
+          }
+        );
+        const verdicts = this.scopes.get(scope) ?? [];
+        verdicts.push(verdict);
+        this.scopes.set(scope, verdicts);
+      }
+      /** Wait for every verdict in the scope and throw the first failure. */
+      async join(scope) {
+        for (const verdict of [...this.scopes.get(scope) ?? []]) {
+          await verdict.promise.catch(() => void 0);
+          if (verdict.failed) {
+            throw verdict.failure;
+          }
+        }
+        const unfinished = (this.scopes.get(scope) ?? []).filter((verdict) => !verdict.passed);
+        if (unfinished.length > 0) {
+          this.scopes.set(scope, unfinished);
+        } else {
+          this.scopes.delete(scope);
+        }
+      }
+      /** Throw the failure of a verdict that has already landed, without waiting for the rest. */
+      check(scope) {
+        const landed = this.scopes.get(scope)?.find((verdict) => verdict.failed);
+        if (landed !== void 0) {
+          throw landed.failure;
+        }
+      }
+      /** Forget a scope once its execution has ended. */
+      drop(scope) {
+        this.scopes.delete(scope);
+      }
+      clear() {
+        this.scopes.clear();
+      }
+    };
   }
 });
 function extractTextFromPrompts(prompts) {
@@ -362,6 +576,19 @@ var init_thread_identity = __esm({
         }
         return discarded;
       }
+      /** The outermost tracked ancestor, which scopes verdicts deferred by its descendants. */
+      root(runId) {
+        const visited = /* @__PURE__ */ new Set([runId]);
+        let current = runId;
+        for (; ; ) {
+          const parent = this.runs.get(current)?.parentRunId;
+          if (parent === void 0 || visited.has(parent) || !this.runs.has(parent)) {
+            return current;
+          }
+          visited.add(parent);
+          current = parent;
+        }
+      }
       get(runId) {
         const run = this.runs.get(runId);
         return run ? run.threadId : this.boundIdentity?.threadId;
@@ -437,7 +664,14 @@ async function buildLangChainHandler(firewall, options, boundIdentity) {
   const { ensureConfig } = await import("@langchain/core/runnables");
   const threads = new RunThreadIdentity(boundIdentity, () => ensureConfig());
   const { BaseTracer } = await import("@langchain/core/tracers/base");
+  const deferred = new Deferred();
+  const dropScope = (runId) => {
+    if (threads.root(runId) === runId) {
+      deferred.drop(runId);
+    }
+  };
   let finishRun = (runId) => {
+    dropScope(runId);
     threads.finish(runId);
   };
   const enabledHooks = resolveHooks(options.hooks);
@@ -458,18 +692,38 @@ async function buildLangChainHandler(firewall, options, boundIdentity) {
       logger("onClassify callback threw", err);
     }
   };
-  const classifyEvent = async (text, hookLabel, runId, toolName) => {
+  const parallel = options.parallel ?? false;
+  const background = requestedMode === "shadow" && failOpen;
+  const report = (result, text, hookLabel, runId, toolName) => {
+    const blocked = result.prediction === "MALICIOUS" || result.governance?.action === "block";
+    const effectiveMode2 = requestedMode ?? result.mode ?? "block";
+    fireOnClassify({
+      hook: hookLabel,
+      ...toolName !== void 0 ? { toolName } : {},
+      runId,
+      text,
+      result,
+      blocked,
+      mode: effectiveMode2,
+      shadowMode: effectiveMode2 === "shadow"
+    });
+    if (!blocked || effectiveMode2 !== "block") {
+      return;
+    }
+    throw new FirewallBlockedException({
+      score: result.score,
+      threshold: result.threshold,
+      promptText: text,
+      runId,
+      hook: hookLabel,
+      ...toolName !== void 0 ? { toolName } : {},
+      result
+    });
+  };
+  const classifyEvent = async (text, hookLabel, runId, request, toolName) => {
     let result;
     try {
-      result = await firewall.classify(text, {
-        hook: hookLabel,
-        metadata: {
-          langgraph: { run_id: runId },
-          ...threads.get(runId) === void 0 ? {} : { conversationId: threads.get(runId) }
-        },
-        ...requestedMode !== void 0 ? { mode: requestedMode } : {},
-        ...toolName !== void 0 ? { toolName } : {}
-      });
+      result = await firewall.classify(text, request);
     } catch (err) {
       if (isReviewCompatibilityError(err)) {
         throw err;
@@ -480,38 +734,49 @@ async function buildLangChainHandler(firewall, options, boundIdentity) {
       logger("classification failed, allowing prompt through", err);
       return;
     }
-    const threshold = result.threshold;
-    const blocked = result.prediction === "MALICIOUS" || result.governance?.action === "block";
-    const effectiveMode2 = requestedMode ?? result.mode ?? "block";
-    const commonEventFields = {
-      hook: hookLabel,
-      ...toolName !== void 0 ? { toolName } : {},
-      runId,
-      text,
-      result
-    };
-    fireOnClassify({
-      ...commonEventFields,
-      blocked,
-      mode: effectiveMode2,
-      shadowMode: effectiveMode2 === "shadow"
-    });
-    if (!blocked || effectiveMode2 !== "block") {
-      return;
+    report(result, text, hookLabel, runId, toolName);
+  };
+  const settle = (runId) => deferred.join(threads.root(runId));
+  const settleRoot = async (runId) => {
+    if (threads.root(runId) === runId) {
+      await settle(runId);
     }
-    throw new FirewallBlockedException({
-      score: result.score,
-      threshold,
-      promptText: text,
-      runId,
-      hook: hookLabel,
-      ...toolName !== void 0 ? { toolName } : {},
-      result
-    });
+  };
+  const checkLanded = (runId) => {
+    try {
+      deferred.check(threads.root(runId));
+    } catch (error) {
+      finishRun(runId);
+      throw error;
+    }
   };
   const classify = async (text, hook, runId, toolName) => {
+    const request = {
+      hook,
+      metadata: {
+        langgraph: { run_id: runId },
+        ...threads.get(runId) === void 0 ? {} : { conversationId: threads.get(runId) }
+      },
+      ...requestedMode !== void 0 ? { mode: requestedMode } : {},
+      ...toolName !== void 0 ? { toolName } : {}
+    };
+    const conversation = conversationId(request.metadata);
+    const check = () => classifyEvent(text, hook, runId, request, toolName);
     try {
-      await classifyEvent(text, hook, runId, toolName);
+      if (background) {
+        void firewall.observe(text, request).then((result) => {
+          if (result !== void 0) {
+            report(result, text, hook, runId, toolName);
+          }
+        });
+      } else if (!parallel) {
+        await check();
+      } else if (DEFERRED_LABELS.has(hook)) {
+        deferred.add(threads.root(runId), firewall.pending.submit(check, conversation));
+      } else {
+        await settle(runId);
+        await firewall.pending.submit(check, conversation);
+      }
     } catch (error) {
       finishRun(runId);
       throw error;
@@ -567,16 +832,19 @@ async function buildLangChainHandler(firewall, options, boundIdentity) {
     async handleAgentEnd() {
     }
     async handleLLMNewToken(_token, _idx, runId) {
+      checkLanded(runId);
       return this.getRunById(runId) ?? this._createRunForLLMStart(serialized(void 0, "llm"), [], runId);
     }
     capture(runId, parentRunId, metadata) {
       for (const id of threads.start(runId, parentRunId, metadata)) {
+        deferred.drop(id);
         this.runMap.delete(id);
         this.runTreeMap?.delete(id);
       }
     }
     finishAll() {
       for (const id of [...this.runMap.keys()]) this.finishRun(id);
+      deferred.clear();
       this.runTreeMap?.clear();
     }
     finishRun(runId) {
@@ -671,6 +939,7 @@ async function buildLangChainHandler(firewall, options, boundIdentity) {
     async handleLLMEnd(output, runId) {
       try {
         if (!this.getRunById(runId)) this._createRunForLLMStart(serialized(void 0, "llm"), [], runId);
+        await settle(runId);
         if (enabledHooks.has(FirewallHook.LLM_END)) {
           const text = extractTextFromLLMResult(output);
           if (text) await classify(text, FIREWALL_HOOK_TO_LABEL[FirewallHook.LLM_END], runId);
@@ -687,6 +956,7 @@ async function buildLangChainHandler(firewall, options, boundIdentity) {
           const text = String(output).trim();
           if (text) await classify(text, FIREWALL_HOOK_TO_LABEL[FirewallHook.TOOL_END], runId, kwargs?.name);
         }
+        await settleRoot(runId);
         return await super.handleToolEnd(output, runId);
       } finally {
         finishRun(runId);
@@ -699,17 +969,21 @@ async function buildLangChainHandler(firewall, options, boundIdentity) {
           const text = extractTextFromDocuments(documents);
           if (text) await classify(text, FIREWALL_HOOK_TO_LABEL[FirewallHook.RETRIEVER_END], runId);
         }
+        await settleRoot(runId);
         return await super.handleRetrieverEnd(documents, runId);
       } finally {
         finishRun(runId);
       }
     }
     async handleChainStart(chain, inputs, runId, parentRunId, tags, metadata, runType, name) {
-      return super.handleChainStart(serialized(chain, "chain"), inputs, runId, parentRunId, tags, metadata, runType, name);
+      const run = await super.handleChainStart(serialized(chain, "chain"), inputs, runId, parentRunId, tags, metadata, runType, name);
+      checkLanded(runId);
+      return run;
     }
     async handleChainEnd(...args) {
       if (!this.getRunById(args[1])) this._createRunForChainStart(serialized(void 0, "chain"), {}, args[1]);
       try {
+        await settleRoot(args[1]);
         return await super.handleChainEnd(...args);
       } finally {
         finishRun(args[1]);
@@ -750,6 +1024,7 @@ async function buildLangChainHandler(firewall, options, boundIdentity) {
   }
   const handler = new SilmarilFirewallHandler();
   finishRun = (runId) => {
+    dropScope(runId);
     handler.finishRun(runId);
   };
   handlerCleanups.set(handler, () => handler.finishAll());
@@ -856,21 +1131,28 @@ async function protectLangChainRunnable(firewall, runnable, options = {}) {
 }
 var handlerCleanups;
 var USER_ROLES;
+var DEFERRED_LABELS;
 var init_langchain = __esm({
   "src/adapters/langchain.ts"() {
     "use strict";
     init_exceptions();
     init_hooks();
     init_modes();
+    init_pending();
     init_extract();
     init_thread_identity();
     handlerCleanups = /* @__PURE__ */ new WeakMap();
     USER_ROLES = /* @__PURE__ */ new Set(["human", "user"]);
+    DEFERRED_LABELS = /* @__PURE__ */ new Set([
+      HookLabel.USER_INPUT,
+      HookLabel.TOOL_RESPONSE
+    ]);
   }
 });
 init_exceptions();
 init_hooks();
 init_modes();
+init_pending();
 function stringifyToolValue(value) {
   if (value === null || value === void 0) {
     return "";
@@ -945,14 +1227,15 @@ function findLastUserMessage(messages) {
 }
 function createMiddleware(firewall, options = {}) {
   const scanInput = options.scanInput ?? true;
-  const scanOutput = options.scanOutput ?? false;
+  const scanOutput = options.scanOutput ?? true;
+  const parallel = options.parallel ?? false;
   const requestedMode = validateMode(options.mode) ?? (options.shadowMode === void 0 ? firewall.mode : options.shadowMode ? "shadow" : "block");
   const classifyOrBlock = async (text, hook, context = { toolName: void 0, toolCallId: void 0 }) => {
     if (!text.trim()) {
       return;
     }
     const { toolName, toolCallId } = context;
-    const result = await firewall.classify(
+    const classify = () => firewall.classify(
       text,
       {
         hook,
@@ -960,6 +1243,7 @@ function createMiddleware(firewall, options = {}) {
         ...requestedMode !== void 0 ? { mode: requestedMode } : {}
       }
     );
+    const result = await (parallel ? firewall.pending.submit(classify) : classify());
     const threshold = result.threshold;
     const blocked = result.prediction === "MALICIOUS" || result.governance?.action === "block";
     const effectiveMode2 = requestedMode ?? result.mode ?? "block";
@@ -1014,11 +1298,14 @@ function createMiddleware(firewall, options = {}) {
     await classifyOrBlock(text, HookLabel.USER_INPUT);
   };
   const scanGenerateResult = async (result) => {
-    if (scanOutput && typeof result.text === "string" && result.text.length > 0) {
-      await classifyOrBlock(result.text, HookLabel.LLM_OUTPUT);
+    const content = Array.isArray(result.content) ? result.content : [];
+    const text = typeof result.text === "string" ? result.text : content.filter((part) => part?.type === "text").map((part) => part.text ?? "").join("");
+    if (scanOutput && text.length > 0) {
+      await classifyOrBlock(text, HookLabel.LLM_OUTPUT);
     }
-    if (options.scanToolCalls && Array.isArray(result.toolCalls)) {
-      for (const call of result.toolCalls) {
+    const toolCalls = Array.isArray(result.toolCalls) ? result.toolCalls : content.filter((part) => part?.type === "tool-call");
+    if (options.scanToolCalls) {
+      for (const call of toolCalls) {
         if (!call || typeof call !== "object") {
           continue;
         }
@@ -1032,6 +1319,16 @@ function createMiddleware(firewall, options = {}) {
       }
     }
   };
+  const guarded = async (prompt, run, discard) => {
+    if (!scanInput) {
+      return run();
+    }
+    if (parallel) {
+      return alongside(scanPrompt(prompt), run, discard);
+    }
+    await scanPrompt(prompt);
+    return run();
+  };
   return {
     specificationVersion: "v3",
     middlewareVersion: "v2",
@@ -1039,10 +1336,7 @@ function createMiddleware(firewall, options = {}) {
       params,
       doGenerate
     }) {
-      if (scanInput) {
-        await scanPrompt(params.prompt ?? []);
-      }
-      const result = await doGenerate();
+      const result = await guarded(params.prompt ?? [], doGenerate);
       await scanGenerateResult(result);
       return result;
     },
@@ -1050,10 +1344,9 @@ function createMiddleware(firewall, options = {}) {
       params,
       doStream
     }) {
-      if (scanInput) {
-        await scanPrompt(params.prompt ?? []);
-      }
-      const { stream, ...rest } = await doStream();
+      const { stream, ...rest } = await guarded(params.prompt ?? [], doStream, (started) => {
+        void started.stream.cancel().catch(() => void 0);
+      });
       if (!scanOutput) {
         return { stream, ...rest };
       }
@@ -1089,7 +1382,18 @@ function createMiddleware(firewall, options = {}) {
   };
 }
 init_exceptions();
+init_hooks();
 init_modes();
+var PYTHON_NONBLANK = /[^\p{White_Space}\u001c-\u001f]/u;
+function isPythonNonblankString(value) {
+  return typeof value === "string" && PYTHON_NONBLANK.test(value);
+}
+function validateThreshold(name, value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error(`Firewall: ${name} must be a finite number between 0 and 1`);
+  }
+  return value;
+}
 var Outcome = {
   Benign: "benign",
   InformationDisclosure: "information_disclosure",
@@ -1101,7 +1405,7 @@ var Outcome = {
   StoryScriptGeneration: "story_script_generation",
   GameGeneration: "game_generation",
   WebsiteGeneration: "website_generation",
-  ClickUpTermsViolation: "clickup_terms_violation",
+  Abuse: "abuse",
   TraditionalAiAbuse: "traditional_ai_abuse"
 };
 var PRIMARY_OUTCOMES = [
@@ -1115,7 +1419,7 @@ var PRIMARY_OUTCOMES = [
   Outcome.StoryScriptGeneration,
   Outcome.GameGeneration,
   Outcome.WebsiteGeneration,
-  Outcome.ClickUpTermsViolation,
+  Outcome.Abuse,
   Outcome.TraditionalAiAbuse
 ];
 var HARMFUL_OUTCOMES = [
@@ -1128,7 +1432,7 @@ var HARMFUL_OUTCOMES = [
   Outcome.StoryScriptGeneration,
   Outcome.GameGeneration,
   Outcome.WebsiteGeneration,
-  Outcome.ClickUpTermsViolation,
+  Outcome.Abuse,
   Outcome.TraditionalAiAbuse
 ];
 var OUTCOME_DESCRIPTIONS = {
@@ -1142,7 +1446,7 @@ var OUTCOME_DESCRIPTIONS = {
   [Outcome.StoryScriptGeneration]: "Requests generation of narrative prose, dialogue, scripts, or story artifacts.",
   [Outcome.GameGeneration]: "Requests generation of a game, quest, level, mechanic, or playable experience.",
   [Outcome.WebsiteGeneration]: "Requests generation of a website, landing page, storefront, or web experience.",
-  [Outcome.ClickUpTermsViolation]: "Requests content or actions that violate the configured ClickUp tenant policy.",
+  [Outcome.Abuse]: "Requests content or actions that violate the tenant's acceptable-use policy.",
   [Outcome.TraditionalAiAbuse]: "Requests unsafe AI assistance outside the concrete security outcome classes."
 };
 var PRIMARY_OUTCOME_SET = new Set(PRIMARY_OUTCOMES);
@@ -1154,18 +1458,18 @@ function isHarmfulOutcome(value) {
   return typeof value === "string" && HARMFUL_OUTCOME_SET.has(value);
 }
 function normalizePrimaryOutcome(value, fieldName = "primary_outcome") {
-  if (typeof value !== "string") {
+  if (!isPythonNonblankString(value)) {
     throw new Error(`Firewall: invalid ${fieldName} ${JSON.stringify(value)}`);
   }
   return isPrimaryOutcome(value) ? value : value;
 }
 function normalizeHarmfulOutcome(value, fieldName = "outcome") {
-  if (typeof value !== "string" || value === Outcome.Benign) {
+  if (!isPythonNonblankString(value) || value === Outcome.Benign) {
     throw new Error(`Firewall: invalid ${fieldName} ${JSON.stringify(value)}`);
   }
   return isHarmfulOutcome(value) ? value : value;
 }
-function normalizeHarmfulOutcomeMap(values, fieldName) {
+function normalizeNumericOutcomeMap(values, fieldName, accepts) {
   if (values === void 0 || values === null) {
     return void 0;
   }
@@ -1175,25 +1479,25 @@ function normalizeHarmfulOutcomeMap(values, fieldName) {
   const out = {};
   for (const [key, value] of Object.entries(values)) {
     const normalizedKey = normalizeHarmfulOutcome(key, `${fieldName} key`);
-    if (typeof value !== "number") {
+    if (typeof value !== "number" || !accepts(value)) {
       throw new Error(`Firewall: invalid ${fieldName} value for ${JSON.stringify(key)}`);
     }
-    out[normalizedKey] = value;
+    Object.defineProperty(out, normalizedKey, {
+      value,
+      enumerable: true,
+      configurable: true,
+      writable: true
+    });
   }
   return Object.freeze(out);
 }
-function normalizeHarmfulOutcomeCountMap(values, fieldName) {
-  const out = normalizeHarmfulOutcomeMap(values, fieldName);
-  if (out === void 0) {
-    return void 0;
-  }
-  for (const [key, value] of Object.entries(out)) {
-    if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
-      throw new Error(`Firewall: invalid ${fieldName} value for ${JSON.stringify(key)}`);
-    }
-  }
-  return out;
+function normalizeHarmfulOutcomeMap(values, fieldName) {
+  return normalizeNumericOutcomeMap(values, fieldName, (value) => value >= 0 && value <= 1);
 }
+function normalizeHarmfulOutcomeCountMap(values, fieldName) {
+  return normalizeNumericOutcomeMap(values, fieldName, (value) => Number.isInteger(value) && value >= 0);
+}
+init_pending();
 function isHighSurrogate(code) {
   return code >= 55296 && code <= 56319;
 }
@@ -1218,7 +1522,7 @@ function sanitizeText(text) {
   }
   return out;
 }
-var SDK_VERSION = "0.8.2";
+var SDK_VERSION = "0.11.0";
 var DEFAULT_TIMEOUT_MS = 1e4;
 var DEFAULT_MAX_RETRIES = 5;
 var MAX_BACKOFF_SECONDS = 30;
@@ -1262,8 +1566,8 @@ function blockResultFromResponse(data, requestedMode, requestedReview) {
   }
   const result = {
     prediction: data.prediction,
-    score: Number(data.score),
-    threshold: Number(data.threshold)
+    score: validateThreshold("response score", data.score),
+    threshold: validateThreshold("response threshold", data.threshold)
   };
   if (requestedReview !== void 0) {
     result.review = requestedReview;
@@ -1300,6 +1604,26 @@ function blockResultFromResponse(data, requestedMode, requestedReview) {
     result.governance = governanceDecisionFromResponse(data.governance);
   }
   return Object.freeze(result);
+}
+function wireCopy(value) {
+  const encoded = JSON.stringify(value);
+  return encoded === void 0 ? value : JSON.parse(encoded);
+}
+function snapshotRequest(options) {
+  return {
+    ...options,
+    ...options.metadata === void 0 ? {} : { metadata: wireCopy(options.metadata) },
+    ...options.governance === void 0 ? {} : { governance: wireCopy(options.governance) }
+  };
+}
+function outputRequest(input) {
+  return {
+    hook: HookLabel.LLM_OUTPUT,
+    ...input.mode === void 0 ? {} : { mode: input.mode },
+    ...input.review === void 0 ? {} : { review: input.review },
+    ...input.metadata === void 0 ? {} : { metadata: input.metadata },
+    ...input.signal === void 0 ? {} : { signal: input.signal }
+  };
 }
 function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1405,13 +1729,15 @@ function governanceDecisionFromResponse(value) {
   if (value.rule_id !== void 0 && value.rule_id !== null && typeof value.rule_id !== "string") {
     throw new Error("Firewall: response governance rule_id must be a string when provided");
   }
-  if (value.identity_revision !== void 0 && value.identity_revision !== null && typeof value.identity_revision !== "string") {
+  if (value.identity_revision !== void 0 && value.identity_revision !== null && !isPythonNonblankString(value.identity_revision)) {
     throw new Error(
-      "Firewall: response governance identity_revision must be a string when provided"
+      "Firewall: response governance identity_revision must be a non-empty string when provided"
     );
   }
-  if (value.reason !== void 0 && value.reason !== null && typeof value.reason !== "string") {
-    throw new Error("Firewall: response governance reason must be a string when provided");
+  if (value.reason !== void 0 && value.reason !== null && !isPythonNonblankString(value.reason)) {
+    throw new Error(
+      "Firewall: response governance reason must be a non-empty string when provided"
+    );
   }
   const resource = value.resource === void 0 || value.resource === null ? void 0 : governanceResourceFromResponse(value.resource);
   return Object.freeze({
@@ -1546,6 +1872,8 @@ var Firewall = class {
   shadowMode;
   mode;
   review;
+  /** @internal Shared by adapters so one conversation keeps a single send order. */
+  pending;
   headers;
   constructor(options) {
     if (!options.apiKey) {
@@ -1568,6 +1896,10 @@ var Firewall = class {
     this.mode = validateMode(options.mode) ?? legacyMode(options.shadowMode);
     this.review = validateReview(options.review, "review");
     this.shadowMode = this.mode === "shadow";
+    this.pending = new PendingVerdicts(
+      validateLimit("maxConcurrent", options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT),
+      validateLimit("maxQueued", options.maxQueued ?? DEFAULT_MAX_QUEUED)
+    );
     this.headers = Object.freeze({
       "x-api-key": this.apiKey,
       "content-type": "application/json"
@@ -1576,6 +1908,87 @@ var Firewall = class {
   async classify(text, options = {}) {
     const requestId = options.requestId ?? randomUUID();
     return this.classifySingle(sanitizeText(text), options, { requestId });
+  }
+  /**
+   * Run an operation while its input is classified and withhold a blocked result.
+   * The operation's signal aborts when a block arrives before it finishes.
+   */
+  async protect(operation, options) {
+    const { text, output, ...request } = options;
+    const requestedMode = validateMode(options.mode) ?? this.mode;
+    const controller = new AbortController();
+    if (requestedMode === "shadow" || requestedMode === "warn") {
+      const observed = this.observable(request);
+      if (observed !== void 0) {
+        void this.background(text, observed);
+      }
+      const result2 = await operation(controller.signal);
+      if (observed !== void 0 && output !== void 0) {
+        void this.background(output(result2), outputRequest(observed));
+      }
+      return result2;
+    }
+    const input = snapshotRequest(request);
+    const conversation = conversationId(input.metadata);
+    const outputOptions = outputRequest(input);
+    const verdict = this.pending.submit(() => this.enforce(text, input), conversation, input.signal);
+    const [, result] = await Promise.all([
+      verdict.catch((error) => {
+        controller.abort(error);
+        throw error;
+      }),
+      Promise.resolve().then(() => operation(controller.signal))
+    ]);
+    if (output !== void 0) {
+      const generated = output(result);
+      await this.pending.submit(
+        () => this.enforce(generated, outputOptions),
+        conversation,
+        input.signal
+      );
+    }
+    return result;
+  }
+  /** Wait for classifications still running in the background. */
+  flush() {
+    return this.pending.drain();
+  }
+  /**
+   * @internal Classify in the background with one retry; resolves undefined on failure.
+   * The request is copied now and detached from the caller's signal.
+   */
+  observe(text, options = {}) {
+    const request = this.observable(options);
+    return request === void 0 ? Promise.resolve(void 0) : this.background(text, request);
+  }
+  background(text, request) {
+    return this.pending.observe(() => this.classify(text, request), conversationId(request.metadata));
+  }
+  /** Copy a background request, reporting one that cannot be copied instead of failing the caller. */
+  observable(options) {
+    try {
+      const request = snapshotRequest(options);
+      delete request.signal;
+      return request;
+    } catch (error) {
+      reportBackground("background classification failed", error);
+      return void 0;
+    }
+  }
+  async enforce(text, options) {
+    const result = await this.classify(text, options);
+    const blocked = result.prediction === "MALICIOUS" || result.governance?.action === "block";
+    if (blocked && (result.mode ?? "block") === "block") {
+      throw new FirewallBlockedException({
+        score: result.score,
+        threshold: result.threshold,
+        promptText: text,
+        ...options.hook === void 0 ? {} : { hook: options.hook },
+        ...options.toolName === void 0 ? {} : { toolName: options.toolName },
+        result
+      });
+    }
+    return result;
   }
   async classifyBatch(texts, options = {}) {
     if (texts.length === 0) {
@@ -1653,7 +2066,8 @@ var Firewall = class {
   asMiddleware(options = {}) {
     return createMiddleware(this, options);
   }
-  async postWithRetry(payload, callerSignal, maxRetries = DEFAULT_MAX_RETRIES) {
+  async postWithRetry(payload, callerSignal) {
+    const maxRetries = retryBudget(DEFAULT_MAX_RETRIES);
     callerSignal?.throwIfAborted();
     const body = JSON.stringify(payload);
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -2026,12 +2440,12 @@ var CACHE_VERSION = 1;
 var DEFAULT_TTL_MS = 10 * 60 * 1e3;
 var MAX_CACHE_BYTES = 4 * 1024;
 var MAX_CACHE_FILES_SCANNED = 128;
-async function writeOutputDecision(conversationId, generationId, classification, options = {}) {
+async function writeOutputDecision(conversationId2, generationId, classification, options = {}) {
   const directory = options.directory ?? defaultCacheDirectory();
   const decision = omitUndefined2({
     version: CACHE_VERSION,
     createdAt: (options.now ?? /* @__PURE__ */ new Date()).toISOString(),
-    conversationFingerprint: fingerprint2("conversation", conversationId),
+    conversationFingerprint: fingerprint2("conversation", conversationId2),
     generationFingerprint: fingerprint2("generation", generationId),
     prediction: "MALICIOUS",
     score: unitInterval2(classification.score),
@@ -2041,7 +2455,7 @@ async function writeOutputDecision(conversationId, generationId, classification,
   const body = Buffer.from(`${JSON.stringify(decision)}
 `, "utf8");
   if (body.byteLength > MAX_CACHE_BYTES) return false;
-  const destination = path2.join(directory, cacheFileName(conversationId, generationId));
+  const destination = path2.join(directory, cacheFileName(conversationId2, generationId));
   const temporary = path2.join(directory, `.${path2.basename(destination)}.${process.pid}.${randomUUID3()}.tmp`);
   let handle;
   try {
@@ -2064,8 +2478,8 @@ async function writeOutputDecision(conversationId, generationId, classification,
     return false;
   }
 }
-async function consumeOutputDecision(conversationId, generationId, options = {}) {
-  const destination = path2.join(options.directory ?? defaultCacheDirectory(), cacheFileName(conversationId, generationId));
+async function consumeOutputDecision(conversationId2, generationId, options = {}) {
+  const destination = path2.join(options.directory ?? defaultCacheDirectory(), cacheFileName(conversationId2, generationId));
   try {
     const encoded = await readFile(destination);
     await rm2(destination, { force: true });
@@ -2075,7 +2489,7 @@ async function consumeOutputDecision(conversationId, generationId, options = {})
     const age = (options.now ?? /* @__PURE__ */ new Date()).getTime() - Date.parse(value.createdAt);
     const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
     if (!Number.isFinite(age) || age < 0 || age > ttlMs) return void 0;
-    if (value.conversationFingerprint !== fingerprint2("conversation", conversationId)) return void 0;
+    if (value.conversationFingerprint !== fingerprint2("conversation", conversationId2)) return void 0;
     if (value.generationFingerprint !== fingerprint2("generation", generationId)) return void 0;
     return value;
   } catch {
@@ -2113,8 +2527,8 @@ async function cleanupExpiredOutputDecisions(directory, now) {
     }
   }
 }
-function cacheFileName(conversationId, generationId) {
-  return `decision-${sha2562(`${conversationId}\0${generationId}`)}.json`;
+function cacheFileName(conversationId2, generationId) {
+  return `decision-${sha2562(`${conversationId2}\0${generationId}`)}.json`;
 }
 function isCachedDecision(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -2141,7 +2555,7 @@ function omitUndefined2(value) {
 
 // src/cursor-hook.ts
 var PLUGIN_NAME = "cursor-firewall-plugin";
-var PLUGIN_VERSION = "0.3.5";
+var PLUGIN_VERSION = "0.3.6";
 var MAX_STDIN_BYTES = 4 * 1024 * 1024;
 var SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
 var MAC_DEVICE_NAME_TIMEOUT_MS = 100;
