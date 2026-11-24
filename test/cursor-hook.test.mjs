@@ -83,41 +83,96 @@ test("configured pilot override wins and backend mode controls otherwise", () =>
   assert.equal(effectiveMode({ prediction: "MALICIOUS" }), "shadow");
 });
 
-test("bundled SDK enforces backend-selected Block when local mode is omitted", async () => {
+async function withClassifierResponse(body, run) {
   const originalFetch = globalThis.fetch;
   const requestBodies = [];
   globalThis.fetch = async (_input, init) => {
     requestBodies.push(JSON.parse(String(init?.body)));
-    return new Response(JSON.stringify({
-      prediction: "MALICIOUS",
-      score: 0.99,
-      threshold: 0.5,
-      mode: "block",
-    }), {
+    return new Response(JSON.stringify(body), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   };
+  try {
+    return await run(requestBodies);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
 
+const PROMPT_BLOCK_OUTPUT = {
+  continue: false,
+  user_message: "Silmaril Firewall blocked potentially malicious content.",
+};
+
+test("bundled SDK enforces backend-selected Block when local mode is omitted", async () => {
   const env = { ...BASE_ENV };
   delete env.SILMARIL_BLOCK_MALICIOUS;
   const events = [];
-  try {
+  await withClassifierResponse({
+    prediction: "MALICIOUS",
+    score: 0.99,
+    threshold: 0.5,
+    mode: "block",
+  }, async (requestBodies) => {
     const output = await runCursorHook(
       hookInput("beforeSubmitPrompt", { prompt: "unsafe prompt" }),
       env,
       { evidenceEmitter: async (event) => { events.push(event); } },
     );
-    assert.deepEqual(output, {
-      continue: false,
-      user_message: "Silmaril Firewall blocked potentially malicious content.",
-    });
+    assert.deepEqual(output, PROMPT_BLOCK_OUTPUT);
     assert.equal(requestBodies.length, 1);
     assert.equal(Object.hasOwn(requestBodies[0], "mode"), false);
     assert.equal(events[0].mode, "block");
     assert.equal(events[0].policyDecision, "block");
-  } finally {
-    globalThis.fetch = originalFetch;
+  });
+});
+
+test("bundled SDK blocks abuse and unknown outcomes through its response validation", async () => {
+  for (const outcome of ["abuse", "future_policy_violation"]) {
+    const events = [];
+    await withClassifierResponse({
+      prediction: "MALICIOUS",
+      score: 0.97,
+      threshold: 0.5,
+      mode: "block",
+      primary_outcome: outcome,
+      outcome_scores: { [outcome]: 0.97 },
+      detector_scores: { [outcome]: 0.9 },
+      detector_counts: { [outcome]: 1 },
+    }, async (requestBodies) => {
+      const output = await runCursorHook(
+        hookInput("beforeSubmitPrompt", { prompt: "unsafe prompt" }),
+        { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" },
+        { evidenceEmitter: async (event) => { events.push(event); } },
+      );
+      assert.deepEqual(output, PROMPT_BLOCK_OUTPUT, outcome);
+      assert.equal(requestBodies.length, 1, outcome);
+      assert.equal(events[0].policyDecision, "block", outcome);
+    });
+  }
+});
+
+test("bundled SDK rejects invalid verdict numbers and the hook fails open", async () => {
+  const malicious = { prediction: "MALICIOUS", mode: "block" };
+  const invalidResponses = [
+    { ...malicious, threshold: 0.5 },
+    { ...malicious, score: 0.97 },
+    { ...malicious, score: 1.5, threshold: 0.5 },
+    { ...malicious, score: 0.97, threshold: "0.5" },
+    { ...malicious, score: 0.97, threshold: 0.5, outcome_scores: { abuse: 1.2 } },
+    { ...malicious, score: 0.97, threshold: 0.5, primary_outcome: " " },
+  ];
+  for (const body of invalidResponses) {
+    await withClassifierResponse(body, async (requestBodies) => {
+      const output = await runCursorHook(
+        hookInput("beforeSubmitPrompt", { prompt: "unsafe prompt" }),
+        { ...BASE_ENV, SILMARIL_BLOCK_MALICIOUS: "true" },
+        { evidenceEmitter: async () => {} },
+      );
+      assert.equal(output, undefined, JSON.stringify(body));
+      assert.equal(requestBodies.length, 1, JSON.stringify(body));
+    });
   }
 });
 
