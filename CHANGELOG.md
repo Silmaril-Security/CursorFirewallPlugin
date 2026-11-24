@@ -7,6 +7,7 @@
 - Record the Firewall's `confidence` and `severity` labels in local evidence when a block carries them, and stop recording `modelScore` and `modelThreshold`.
 - Record the SDK result's `modelId` as provenance `modelVersion`, and the governance decision's `policyVersion` as provenance `policyVersion` in place of the plugin's fixed value when a decision carries one. Both have control and format characters removed and are limited to 128 UTF-8 bytes, the limits Silmaril for macOS enforces on ingestion.
 - Store decision fields in the output decision cache under cache version 2 and discard version 1 entries.
+- Map the SDK's harmful outcomes (`control_abuse`, `prompt_injection`, `information_disclosure`, `system_compromise`, `service_disruption`) to their local evidence consequence categories instead of `other`.
 
 ## 0.3.5
 
