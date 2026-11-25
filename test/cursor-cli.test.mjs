@@ -1,33 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtemp, symlink } from "node:fs/promises";
-import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-async function withMockFirewall(run) {
-  const requests = [];
-  const server = http.createServer((request, response) => {
-    let body = "";
-    request.setEncoding("utf8");
-    request.on("data", (chunk) => { body += chunk; });
-    request.on("end", () => {
-      requests.push(JSON.parse(body));
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ prediction: "MALICIOUS", score: 0.9, threshold: 0.5, primary_outcome: "code_execution" }));
-    });
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  try {
-    const address = server.address();
-    assert.ok(address && typeof address === "object");
-    await run(`http://127.0.0.1:${address.port}`, requests);
-  } finally {
-    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-  }
-}
+import { classifyDecision } from "../scripts/classify-responses.mjs";
+import { withMockClassifier } from "./mock-classifier.mjs";
 
 function runHook(input, env, hookPath) {
   return new Promise((resolve, reject) => {
@@ -51,7 +31,7 @@ function runHook(input, env, hookPath) {
 }
 
 test("bundled command hook speaks Cursor JSON over stdio", async () => {
-  await withMockFirewall(async (apiUrl, requests) => {
+  await withMockClassifier(async (apiUrl, requests) => {
     const evidenceDirectory = await mkdtemp(path.join(os.tmpdir(), "silmaril-cursor-cli-"));
     const pluginLink = path.join(evidenceDirectory, "plugin-link");
     await symlink(fileURLToPath(new URL("..", import.meta.url)), pluginLink, "dir");
@@ -100,20 +80,22 @@ test("bundled command hook speaks Cursor JSON over stdio", async () => {
     );
     assert.equal(JSON.parse(deniedMcp.stdout).permission, "deny");
 
-    assert.equal(requests.length, 3);
-    assert.ok(requests.slice(0, 2).every((payload) => payload.hook === "user_input"));
-    assert.ok(requests.slice(0, 2).every((payload) => payload.text === "classify through the bundled hook"));
-    assert.deepEqual(requests[0].resource, { kind: "agent", id: "cursor" });
-    assert.deepEqual(requests[0].metadata.silmaril.governance, {
+    assert.deepEqual(requests.map(({ path: requestPath }) => requestPath), Array(3).fill("/v2/classify"));
+    const payloads = requests.map(({ payload }) => payload);
+    assert.ok(payloads.slice(0, 2).every((payload) => payload.hook === "user_input"));
+    assert.ok(payloads.slice(0, 2).every((payload) => payload.text === "classify through the bundled hook"));
+    assert.deepEqual(payloads[0].resource, { kind: "agent", id: "cursor" });
+    assert.deepEqual(payloads[0].metadata.silmaril.governance, {
       agent: "cursor",
       resource: { kind: "agent", id: "cursor" },
     });
-    assert.deepEqual(requests[2].resource, {
+    assert.equal(payloads[0].metadata.silmaril.sdk_version, "1.0.0");
+    assert.deepEqual(payloads[2].resource, {
       kind: "mcp_tool",
       id: "fetch",
       parent_id: "github",
     });
-    assert.deepEqual(requests[2].metadata.silmaril.governance, {
+    assert.deepEqual(payloads[2].metadata.silmaril.governance, {
       agent: "cursor",
       resource: {
         kind: "mcp_tool",
@@ -121,7 +103,7 @@ test("bundled command hook speaks Cursor JSON over stdio", async () => {
         parent_id: "github",
       },
     });
-    assert.equal(requests[2].metadata.conversationId, "conversation-cli");
-    assert.equal(requests[2].metadata.silmaril.request_id.startsWith("cursor-"), true);
-  });
+    assert.equal(payloads[2].metadata.conversationId, "conversation-cli");
+    assert.equal(payloads[2].metadata.silmaril.request_id.startsWith("cursor-"), true);
+  }, { decision: classifyDecision("block", { source: "model", outcome: "system_compromise" }) });
 });

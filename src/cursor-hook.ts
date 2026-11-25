@@ -46,7 +46,7 @@ export { buildLocalProtectionEvent, resolveLocalEventDirectory, writeLocalProtec
 export { configurationPath, resolveRuntimeConfig } from "./runtime-config.js";
 
 export const PLUGIN_NAME = "cursor-firewall-plugin";
-export const PLUGIN_VERSION = "0.3.6";
+export const PLUGIN_VERSION = "0.4.0";
 const MAX_STDIN_BYTES = 4 * 1024 * 1024;
 const SAFE_BLOCK_MESSAGE = "Silmaril Firewall blocked potentially malicious content.";
 const MAC_DEVICE_NAME_TIMEOUT_MS = 100;
@@ -336,7 +336,7 @@ function buildBlockOutput(target: Target, input: HookRecord): HookOutput | undef
 
 function shouldNativeBlock(target: Target, result: ClassificationResult, config: RuntimeConfig, _input: HookRecord): boolean {
   return effectiveMode(result, config.mode) === "block"
-    && isMalicious(result)
+    && isBlockCandidate(result)
     && target.nativeCapability !== "none";
 }
 
@@ -348,11 +348,11 @@ async function emitEvidence(
   env: RuntimeEnv,
   emitter: RuntimeDependencies["evidenceEmitter"],
 ): Promise<void> {
-  const malicious = isMalicious(result);
+  const blockCandidate = isBlockCandidate(result);
   const mode = effectiveMode(result, config.mode);
   const policyDecision: LocalEvidenceInput["policyDecision"] = nativeBlocked
     ? "block"
-    : malicious
+    : blockCandidate
       ? "monitor"
       : "allow";
   const nativeAction: LocalEvidenceInput["nativeAction"] = nativeBlocked
@@ -369,8 +369,8 @@ async function emitEvidence(
     classification: result,
     policyDecision,
     nativeAction,
-    ...(malicious && mode === "warn" ? { warnDelivery: "unsupported" } : {}),
-    ...(malicious && mode === "block" && !nativeBlocked ? { blockUnavailable: true } : {}),
+    ...(blockCandidate && mode === "warn" ? { warnDelivery: "unsupported" } : {}),
+    ...(blockCandidate && mode === "block" && !nativeBlocked ? { blockUnavailable: true } : {}),
   });
   await Promise.resolve(emitter(event, env)).catch(() => undefined);
 }
@@ -1114,9 +1114,8 @@ export function effectiveMode(
   return returned === "shadow" || returned === "warn" || returned === "block" ? returned : "shadow";
 }
 
-function isMalicious(result: ClassificationResult): boolean {
-  return result.prediction === "MALICIOUS"
-    || readRecord(result.governance)?.action === "block";
+function isBlockCandidate(result: ClassificationResult): boolean {
+  return result.action !== "allow";
 }
 
 function stableStringify(value: unknown): string {
@@ -1176,7 +1175,7 @@ function debugClassification(env: RuntimeEnv, target: Target, result: Classifica
     hookEventName: target.hookEventName,
     hook: target.firewallHook,
     toolName: target.toolName,
-    prediction: result.prediction,
+    action: result.action,
     blocked,
     ...extra,
   });

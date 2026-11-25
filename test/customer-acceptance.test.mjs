@@ -50,6 +50,67 @@ test("a real lean install without QA or live credentials leaves native and live 
 });
 
 
+test("the recorder forwards each classify version to the same customer path and reads either response", async () => {
+  const { modelVerdict, upstreamEndpoint } = await import("../scripts/customer-published-acceptance");
+  const { CLASSIFY_RESPONSES, classifyDecision } = await import("../scripts/classify-responses.mjs");
+  for (const configured of ["/prod/classify", "/prod/classify/", "/prod/v2/classify", "/prod", "/prod/"]) {
+    const upstream = `https://customer.invalid${configured}?tenant=qa`;
+    assert.equal(upstreamEndpoint(upstream, "/v2/classify"), "https://customer.invalid/prod/v2/classify?tenant=qa");
+    assert.equal(upstreamEndpoint(upstream, "/classify"), "https://customer.invalid/prod/classify?tenant=qa");
+  }
+
+  const governance = { action: "block", rule_id: "qa-read-policy", policy_version: "1" };
+  for (const [decision, verdict] of [
+    [classifyDecision("allow"), "benign"],
+    [classifyDecision("block", { source: "model", outcome: "secret_exposure" }), "malicious"],
+    [classifyDecision("block", { source: "governance", governance }), "benign"],
+  ]) {
+    for (const render of CLASSIFY_RESPONSES.values()) {
+      assert.equal(modelVerdict(JSON.stringify(render(decision))), verdict);
+    }
+  }
+  assert.equal(modelVerdict(JSON.stringify({ results: [{ action: "review" }] })), "malicious");
+  assert.equal(modelVerdict('{"prediction":"benign"}'), "benign");
+  for (const unreadable of ["", "not json", "null", "{}", '{"results":[]}', '{"results":[{"action":1}]}', '{"prediction":"UNKNOWN"}', '{"detail":"Not Found"}']) {
+    assert.equal(modelVerdict(unreadable), undefined);
+  }
+});
+
+test("the recorder judges a refused version 2 probe by its completed /classify fallback", async (t) => {
+  const http = await import("node:http");
+  const { canResumeTurn, startRecorder } = await import("../scripts/customer-published-acceptance");
+  const { CLASSIFY_RESPONSES, classifyDecision } = await import("../scripts/classify-responses.mjs");
+  const legacy = http.createServer((request, response) => {
+    request.resume();
+    if (request.url === "/prod/classify") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(CLASSIFY_RESPONSES.get("/classify")(classifyDecision("allow"))));
+      return;
+    }
+    response.writeHead(404, { "content-type": "text/html" });
+    response.end("<html>Not Found</html>");
+  });
+  await new Promise((resolve) => legacy.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => legacy.close(resolve)));
+  const recorder = await startRecorder(`http://127.0.0.1:${legacy.address().port}/prod/classify`, "test-only", "trace-1", false, "word");
+  t.after(recorder.close);
+  const session = "d6fdc7a2-8346-4bf8-a698-a02ddbe322df";
+  const classify = (pathname) => fetch(new URL(pathname.slice(1), recorder.url), {
+    method: "POST",
+    body: JSON.stringify({ hook: "tool_call", text: "read trace-1", metadata: { conversationId: session } }),
+  });
+
+  assert.equal((await classify("/v2/classify")).status, 404);
+  assert.deepEqual(recorder.seen, []);
+  assert.equal((await classify("/classify")).status, 200);
+  assert.deepEqual(recorder.seen.map(({ hook, ok, verdict }) => ({ hook, ok, verdict })), [
+    { hook: "tool_call", ok: true, verdict: "benign" },
+  ]);
+  const turn = { code: 1, session, valid: true, reconnecting: true, disclosed: false };
+  const response = { ...recorder.seen[0], hook: "tool_response", containsWord: true };
+  assert.equal(canResumeTurn(turn, { complete: true, missing: [] }, false, [...recorder.seen, response]), true);
+});
+
 test("the client denial requires the actual rule decision and withholds the unprompted file value", async () => {
   const { denialVisible } = await import("../scripts/customer-published-acceptance");
   const denied = { hook: "tool_call", trace: true, deny: true, ok: true };
@@ -133,12 +194,12 @@ test("only the operator-designated Cursor login may drive the isolated plugin", 
 
 test("reports missing correlated callbacks using only fixed names", async () => {
   const { missingAllowCallbacks } = await import("../scripts/customer-published-acceptance");
-  const observed = (hook, changes = {}) => ({ hook, trace: true, ok: true, prediction: "BENIGN", ...changes });
+  const observed = (hook, changes = {}) => ({ hook, trace: true, ok: true, verdict: "benign", ...changes });
   const tools = [observed("tool_call"), observed("tool_response")];
   assert.deepEqual(missingAllowCallbacks([...tools, observed("user_input", { trace: false }),
-    observed("user_input", { ok: false }), observed("user_input", { prediction: "MALICIOUS" }),
+    observed("user_input", { ok: false }), observed("user_input", { verdict: "malicious" }),
     observed("private provider text")]), ["user_input"]);
-  assert.deepEqual(missingAllowCallbacks([...tools, observed("user_input", { prediction: "benign" })]), []);
+  assert.deepEqual(missingAllowCallbacks([...tools, observed("user_input")]), []);
 });
 
 test("discovers the exact Cursor release after auto-update and respects explicit selection", async (t) => {
@@ -171,7 +232,7 @@ test("discovers the exact Cursor release after auto-update and respects explicit
 test("the pinned CLI may omit only prompt coverage from a completed read or denial", async () => {
   const { assessTurnEvidence } = await import("../scripts/customer-published-acceptance");
   const pin = "2026.11.19-f005e9d";
-  const callback = (hook) => ({ hook, session: "this-turn", trace: true, ok: true, prediction: "BENIGN" });
+  const callback = (hook) => ({ hook, session: "this-turn", trace: true, ok: true, verdict: "benign" });
   const event = (hook, denied = false) => ({
     hook, host: "cursor", provenance: { pluginVersion: version }, sessionFingerprint: "this-turn",
     mode: "block", prediction: "benign", policyDecision: denied ? "block" : "allow",
@@ -203,7 +264,7 @@ test("only a verified read or denial can resume its own interrupted conversation
   const session = "d6fdc7a2-8346-4bf8-a698-a02ddbe322df";
   const fingerprint = createHash("sha256").update(`session:${session}`).digest("hex");
   const turn = { code: 1, session, valid: true, reconnecting: true, disclosed: false };
-  const call = { session: fingerprint, hook: "tool_call", trace: true, deny: false, ok: true, prediction: "BENIGN" };
+  const call = { session: fingerprint, hook: "tool_call", trace: true, deny: false, ok: true, verdict: "benign" };
   const response = { ...call, hook: "tool_response", containsWord: true };
   const evidence = { complete: true, missing: [] };
   const eligible = (t, e = evidence, rows = [call, response]) => canResumeTurn(t, e, false, rows);
@@ -262,9 +323,9 @@ test("the driver resumes once and qualifies only a completed tool-free reply fro
     const [trace, word] = fs.readFileSync(note, "utf8").trim().split(" ");
     const classify = async () => {
       const config = JSON.parse(fs.readFileSync(HOME + "/.cursor/silmaril-firewall.json", "utf8"));
-      const response = await fetch(config.apiUrl, { method: "POST",
+      const response = await fetch(new URL("v2/classify", config.apiUrl), { method: "POST",
         body: JSON.stringify({ hook: "tool_call", text: trace, metadata: { conversationId: session } }) });
-      if ((await response.json()).governance?.action !== "block") throw new Error("expected denied read");
+      if ((await response.json()).results?.[0]?.governance?.action !== "block") throw new Error("expected denied read");
     };
     if (resume < 0) {
       await classify();
