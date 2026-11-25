@@ -9,6 +9,10 @@
 - Store decision fields in the output decision cache under cache version 2 and discard version 1 entries.
 - Map the SDK's harmful outcomes (`control_abuse`, `prompt_injection`, `information_disclosure`, `system_compromise`, `service_disruption`) to their local evidence consequence categories instead of `other`.
 
+## 0.3.6
+
+- Bundle SDK 0.11.0, which names the tenant acceptable-use policy outcome `abuse` and validates verdict scores and thresholds strictly.
+
 ## 0.3.5
 
 - Anchor every native hook command to `CURSOR_PLUGIN_ROOT` while retaining absolute commands in local installations.

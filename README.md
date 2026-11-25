@@ -6,13 +6,13 @@ The plugin classifies host-visible prompts, tool calls, tool results, file reads
 
 ## Install
 
-Release [v0.3.5](https://github.com/Silmaril-Security/CursorFirewallPlugin/releases/tag/v0.3.5)
+Release [v0.3.6](https://github.com/Silmaril-Security/CursorFirewallPlugin/releases/tag/v0.3.6)
 is available. Check out that release and install a lean copy into Cursor's
 local plugin directory for a reproducible installation. Node.js 22 or newer is
 required:
 
 ```sh
-git clone --branch v0.3.5 --depth 1 https://github.com/Silmaril-Security/CursorFirewallPlugin.git
+git clone --branch v0.3.6 --depth 1 https://github.com/Silmaril-Security/CursorFirewallPlugin.git
 cd CursorFirewallPlugin
 npm ci
 npm run install:local

@@ -137,6 +137,18 @@ test("bundled SDK enforces a version 2 block and records its confidence and seve
   assert.equal(events[0].provenance.policyVersion, "cursor-plugin-policy-v1");
 });
 
+test("bundled SDK blocks version 2 model blocks with abuse and unknown outcomes", async () => {
+  for (const outcome of ["abuse", "future_policy_violation"]) {
+    const { output, paths, events } = await runAgainstMockClassifier(
+      { decision: classifyDecision("block", { source: "model", outcome }) },
+      { SILMARIL_MODE: "block" },
+    );
+    assert.deepEqual(output, BLOCKED_PROMPT, outcome);
+    assert.deepEqual(paths, ["/v2/classify"], outcome);
+    assert.equal(events[0].policyDecision, "block", outcome);
+  }
+});
+
 test("bundled SDK enforces a block through the /classify fallback and from a version 1 body on /v2/classify", async () => {
   for (const [responses, expectedPaths] of [
     [FALLBACK_ONLY, ["/v2/classify", "/classify"]],
